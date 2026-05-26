@@ -1,0 +1,5 @@
+.DS_Store
+nimcache/
+out/
+/infinite_blocks
+/players/stacker/stacker
