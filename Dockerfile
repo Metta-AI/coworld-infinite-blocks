@@ -26,20 +26,16 @@ https://github.com/treeform/nimby/releases/download/0.1.26/nimby-Linux-ARM64; \
 ENV PATH="/root/.nimby/nim/bin:$PATH"
 
 WORKDIR /workspace/cogame-infinite-blocks
-COPY infinite_blocks.nimble .
-RUN nimble refresh && \
-  nimble install -y https://github.com/Metta-AI/bitworld.git && \
-  nimble install -y --depsOnly
+COPY nimby.lock .
+RUN nimby sync nimby.lock && \
+  nimby install https://github.com/Metta-AI/bitworld.git
 
 COPY . .
 RUN mkdir -p /workspace/bitworld-assets && \
-  bitworld_path="$(nimble path bitworld | head -n 1)" && \
-  cp -R "$bitworld_path/client" /workspace/bitworld-assets/client
+  cp -R bitworld/client /workspace/bitworld-assets/client
 
-RUN bitworld_path="$(nimble path bitworld | head -n 1)" && \
-  nim c \
+RUN nim c \
   -d:release \
-  --path:"$bitworld_path" \
   --path:src \
   --nimcache:/tmp/cogame-nimcache \
   --out:/bin/infinite_blocks \
