@@ -3349,8 +3349,8 @@ proc defaultScoresPath(): string =
 when isMainModule:
   var
     config = RunConfig(
-      address: DefaultHost,
-      port: DefaultPort,
+      address: cogameHost(DefaultHost),
+      port: cogamePort(DefaultPort),
       seed: 0x1F1B10C,
       saveScoresPath: defaultScoresPath(),
       maxTicks: DefaultMaxTicks,
