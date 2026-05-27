@@ -35,6 +35,7 @@ const
   AdminWebSocketPath = "/admin"
   ReplayWebSocketPath = "/replay"
   RewardWebSocketPath = "/reward"
+  SendPingPayload = "ib"
   GlobalLayerId = 0
   GlobalScorePanelLayerId = 1
   GlobalTopLeftLayerType = 1
@@ -209,6 +210,9 @@ type
     spritePlayerViewers: Table[WebSocket, GlobalViewerState]
     globalViewers: Table[WebSocket, GlobalViewerState]
     rewardViewers: Table[WebSocket, bool]
+    playerSendReady: Table[WebSocket, bool]
+    globalSendReady: Table[WebSocket, bool]
+    rewardSendReady: Table[WebSocket, bool]
     socketKinds: Table[WebSocket, SocketKind]
     resetRequested: bool
 
@@ -2669,6 +2673,9 @@ proc initAppState() =
   appState.spritePlayerViewers = initTable[WebSocket, GlobalViewerState]()
   appState.globalViewers = initTable[WebSocket, GlobalViewerState]()
   appState.rewardViewers = initTable[WebSocket, bool]()
+  appState.playerSendReady = initTable[WebSocket, bool]()
+  appState.globalSendReady = initTable[WebSocket, bool]()
+  appState.rewardSendReady = initTable[WebSocket, bool]()
   appState.socketKinds = initTable[WebSocket, SocketKind]()
   appState.resetRequested = false
 
@@ -2680,6 +2687,8 @@ proc removeGlobalSocket(websocket: WebSocket) =
   ## Removes a global viewer websocket.
   if websocket in appState.globalViewers:
     appState.globalViewers.del(websocket)
+  if websocket in appState.globalSendReady:
+    appState.globalSendReady.del(websocket)
   if websocket in appState.chatMessages:
     appState.chatMessages.del(websocket)
   if websocket in appState.socketKinds:
@@ -2689,6 +2698,8 @@ proc removeRewardSocket(websocket: WebSocket) =
   ## Removes a reward viewer websocket.
   if websocket in appState.rewardViewers:
     appState.rewardViewers.del(websocket)
+  if websocket in appState.rewardSendReady:
+    appState.rewardSendReady.del(websocket)
   if websocket in appState.chatMessages:
     appState.chatMessages.del(websocket)
   if websocket in appState.socketKinds:
@@ -2698,6 +2709,8 @@ proc removePlayerSocket(sim: var SimServer, websocket: WebSocket) =
   ## Removes a player websocket and its player slot.
   if websocket in appState.spritePlayerViewers:
     appState.spritePlayerViewers.del(websocket)
+  if websocket in appState.playerSendReady:
+    appState.playerSendReady.del(websocket)
   if websocket in appState.chatMessages:
     appState.chatMessages.del(websocket)
   if websocket notin appState.playerIndices:
@@ -2730,6 +2743,12 @@ proc removeUnknownSocket(sim: var SimServer, websocket: WebSocket) =
     appState.rewardViewers.del(websocket)
   if websocket in appState.spritePlayerViewers:
     appState.spritePlayerViewers.del(websocket)
+  if websocket in appState.globalSendReady:
+    appState.globalSendReady.del(websocket)
+  if websocket in appState.rewardSendReady:
+    appState.rewardSendReady.del(websocket)
+  if websocket in appState.playerSendReady:
+    appState.playerSendReady.del(websocket)
   if websocket in appState.inputMasks:
     appState.inputMasks.del(websocket)
   if websocket in appState.lastAppliedMasks:
@@ -2777,15 +2796,36 @@ proc sendGlobalMapPackets(
     )
     try:
       globalViewers[i].send(packetBlob, BinaryMessage)
+      globalViewers[i].send(SendPingPayload, Ping)
       {.gcsafe.}:
         withLock appState.lock:
           if globalViewers[i].socketKind() == SocketGlobal and
               globalViewers[i] in appState.globalViewers:
             appState.globalViewers[globalViewers[i]] = nextState
+            appState.globalSendReady[globalViewers[i]] = false
     except:
       {.gcsafe.}:
         withLock appState.lock:
           sim.removeSocket(globalViewers[i])
+
+proc sendRewardPackets(
+  rewardViewers: openArray[WebSocket],
+  rewardPacket: string
+) =
+  ## Sends reward updates to sockets that acknowledged the last frame.
+  for websocket in rewardViewers:
+    try:
+      websocket.send(rewardPacket, TextMessage)
+      websocket.send(SendPingPayload, Ping)
+      {.gcsafe.}:
+        withLock appState.lock:
+          if websocket.socketKind() == SocketReward and
+              websocket in appState.rewardViewers:
+            appState.rewardSendReady[websocket] = false
+    except:
+      {.gcsafe.}:
+        withLock appState.lock:
+          websocket.removeRewardSocket()
 
 proc cleanPlayerName(name: string): string =
   result = name.strip()
@@ -2906,13 +2946,18 @@ proc httpHandler(request: Request) =
       withLock appState.lock:
         if websocket in appState.globalViewers:
           appState.globalViewers.del(websocket)
+        if websocket in appState.globalSendReady:
+          appState.globalSendReady.del(websocket)
         if websocket in appState.rewardViewers:
           appState.rewardViewers.del(websocket)
+        if websocket in appState.rewardSendReady:
+          appState.rewardSendReady.del(websocket)
         if websocket in appState.chatMessages:
           appState.chatMessages.del(websocket)
         appState.socketKinds[websocket] = SocketPlayer
         appState.playerNames[websocket] = request.playerIdentity()
         appState.spritePlayerViewers[websocket] = newGlobalViewerState()
+        appState.playerSendReady[websocket] = true
         appState.playerIndices[websocket] = 0x7fffffff
         appState.inputMasks[websocket] = 0
         appState.lastAppliedMasks[websocket] = 0
@@ -2925,8 +2970,12 @@ proc httpHandler(request: Request) =
       withLock appState.lock:
         if websocket in appState.rewardViewers:
           appState.rewardViewers.del(websocket)
+        if websocket in appState.rewardSendReady:
+          appState.rewardSendReady.del(websocket)
         if websocket in appState.spritePlayerViewers:
           appState.spritePlayerViewers.del(websocket)
+        if websocket in appState.playerSendReady:
+          appState.playerSendReady.del(websocket)
         if websocket in appState.inputMasks:
           appState.inputMasks.del(websocket)
         if websocket in appState.lastAppliedMasks:
@@ -2939,6 +2988,7 @@ proc httpHandler(request: Request) =
           appState.chatMessages.del(websocket)
         appState.socketKinds[websocket] = SocketGlobal
         appState.globalViewers[websocket] = newGlobalViewerState()
+        appState.globalSendReady[websocket] = true
   elif request.path == RewardWebSocketPath and request.httpMethod == "GET" and
       request.isWebSocketUpgrade():
     let websocket = request.upgradeToWebSocket()
@@ -2946,8 +2996,12 @@ proc httpHandler(request: Request) =
       withLock appState.lock:
         if websocket in appState.globalViewers:
           appState.globalViewers.del(websocket)
+        if websocket in appState.globalSendReady:
+          appState.globalSendReady.del(websocket)
         if websocket in appState.spritePlayerViewers:
           appState.spritePlayerViewers.del(websocket)
+        if websocket in appState.playerSendReady:
+          appState.playerSendReady.del(websocket)
         if websocket in appState.inputMasks:
           appState.inputMasks.del(websocket)
         if websocket in appState.lastAppliedMasks:
@@ -2960,6 +3014,7 @@ proc httpHandler(request: Request) =
           appState.chatMessages.del(websocket)
         appState.socketKinds[websocket] = SocketReward
         appState.rewardViewers[websocket] = true
+        appState.rewardSendReady[websocket] = true
   elif request.serveStaticClientHtml():
     discard
   else:
@@ -2976,6 +3031,25 @@ proc websocketHandler(
   of OpenEvent:
     discard
   of MessageEvent:
+    if message.kind == Ping:
+      websocket.send(message.data, Pong)
+      return
+    if message.kind == Pong:
+      {.gcsafe.}:
+        withLock appState.lock:
+          case websocket.socketKind()
+          of SocketPlayer:
+            if websocket in appState.playerSendReady:
+              appState.playerSendReady[websocket] = true
+          of SocketGlobal:
+            if websocket in appState.globalSendReady:
+              appState.globalSendReady[websocket] = true
+          of SocketReward:
+            if websocket in appState.rewardSendReady:
+              appState.rewardSendReady[websocket] = true
+          of SocketUnknown:
+            discard
+      return
     let chatText = message.playerChatFromMessage().cleanChatMessage()
     if message.kind == BinaryMessage and
         isSpritePlayerInputPacket(message.data):
@@ -3108,17 +3182,20 @@ proc runServerLoop(
               sim.players[playerIndex].message = chatText
               sim.players[playerIndex].messageTicks = ChatLifetimeTicks
               appState.chatMessages.del(websocket)
-            sockets.add(websocket)
-            playerIndices.add(playerIndex)
-            if websocket notin appState.spritePlayerViewers:
-              appState.spritePlayerViewers[websocket] = newGlobalViewerState()
-            playerGlobalStates.add(appState.spritePlayerViewers[websocket])
+            if appState.playerSendReady.getOrDefault(websocket, true):
+              sockets.add(websocket)
+              playerIndices.add(playerIndex)
+              if websocket notin appState.spritePlayerViewers:
+                appState.spritePlayerViewers[websocket] = newGlobalViewerState()
+              playerGlobalStates.add(appState.spritePlayerViewers[websocket])
 
         for websocket in appState.rewardViewers.keys:
-          if websocket.socketKind() == SocketReward:
+          if websocket.socketKind() == SocketReward and
+              appState.rewardSendReady.getOrDefault(websocket, true):
             rewardViewers.add(websocket)
         for websocket, state in appState.globalViewers.pairs:
-          if websocket.socketKind() == SocketGlobal:
+          if websocket.socketKind() == SocketGlobal and
+              appState.globalSendReady.getOrDefault(websocket, true):
             globalViewers.add(websocket)
             globalStates.add(state)
 
@@ -3137,11 +3214,12 @@ proc runServerLoop(
             if appState.playerIndices[websocket] == 0x7fffffff:
               let name = appState.playerNames.getOrDefault(websocket, "unknown")
               appState.playerIndices[websocket] = sim.addPlayer(name)
-            sockets.add(websocket)
-            playerIndices.add(appState.playerIndices[websocket])
-            if websocket notin appState.spritePlayerViewers:
-              appState.spritePlayerViewers[websocket] = newGlobalViewerState()
-            playerGlobalStates.add(appState.spritePlayerViewers[websocket])
+            if appState.playerSendReady.getOrDefault(websocket, true):
+              sockets.add(websocket)
+              playerIndices.add(appState.playerIndices[websocket])
+              if websocket notin appState.spritePlayerViewers:
+                appState.spritePlayerViewers[websocket] = newGlobalViewerState()
+              playerGlobalStates.add(appState.spritePlayerViewers[websocket])
       for i in 0 ..< sockets.len:
         var nextState: GlobalViewerState
         let framePacket = blobFromBytes(
@@ -3158,9 +3236,14 @@ proc runServerLoop(
                 sockets[i] in appState.spritePlayerViewers:
               appState.spritePlayerViewers[sockets[i]] = nextState
         sockets[i].send(framePacket, BinaryMessage)
+        sockets[i].send(SendPingPayload, Ping)
+        {.gcsafe.}:
+          withLock appState.lock:
+            if sockets[i].socketKind() == SocketPlayer and
+                sockets[i] in appState.playerSendReady:
+              appState.playerSendReady[sockets[i]] = false
       let rewardPacket = sim.buildRewardPacket()
-      for websocket in rewardViewers:
-        websocket.send(rewardPacket, TextMessage)
+      sendRewardPackets(rewardViewers, rewardPacket)
       sim.sendGlobalMapPackets(globalViewers, globalStates)
       sim.writeScoresIfChanged(saveScoresPath, lastScores)
       runFrameLimiter(lastTick)
@@ -3186,14 +3269,19 @@ proc runServerLoop(
             appState.spritePlayerViewers[sockets[i]] = nextState
       try:
         sockets[i].send(frameBlob, BinaryMessage)
+        sockets[i].send(SendPingPayload, Ping)
+        {.gcsafe.}:
+          withLock appState.lock:
+            if sockets[i].socketKind() == SocketPlayer and
+                sockets[i] in appState.playerSendReady:
+              appState.playerSendReady[sockets[i]] = false
       except:
         {.gcsafe.}:
           withLock appState.lock:
             sim.removeSocket(sockets[i])
 
     let rewardPacket = sim.buildRewardPacket()
-    for websocket in rewardViewers:
-      websocket.send(rewardPacket, TextMessage)
+    sendRewardPackets(rewardViewers, rewardPacket)
 
     if runTicks mod GlobalSendInterval == 0:
       sim.sendGlobalMapPackets(globalViewers, globalStates)

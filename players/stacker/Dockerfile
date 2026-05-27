@@ -47,4 +47,4 @@ RUN apt-get update && \
 
 COPY --from=build /bin/stacker /bin/stacker
 
-CMD ["/bin/stacker", "--address:ws://host.docker.internal:8080/player"]
+CMD ["/bin/stacker"]
