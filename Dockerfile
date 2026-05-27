@@ -49,4 +49,4 @@ COPY --from=build /bin/infinite_blocks /bin/infinite_blocks
 COPY data ./data
 COPY coworld_manifest.json .
 
-CMD ["/bin/infinite_blocks", "--address:0.0.0.0", "--port:8080"]
+CMD ["/bin/infinite_blocks"]

@@ -1,7 +1,7 @@
 import
-  std/[algorithm, json, locks, monotimes, os, parseopt, random, strutils,
+  std/[algorithm, json, locks, monotimes, os, random, strutils,
     tables, times],
-  mummy, pixie, supersnappy,
+  jsony, mummy, pixie, supersnappy,
   bitworld/aseprite, bitworld/client, bitworld/runtime, bitworld/pixelfonts, bitworld/protocol, bitworld/server
 
 const
@@ -98,7 +98,6 @@ type
     address: string
     port: int
     seed: int
-    saveScoresPath: string
     maxTicks: int
     maxGames: int
 
@@ -2616,27 +2615,16 @@ proc playerResultsJson(sim: SimServer): string =
 
 proc writeScoresIfChanged(
   sim: SimServer,
-  path: string,
   lastScores: var string,
-  uri = ""
+  runtimeConfig: RuntimeConfig
 ) =
   ## Writes scores when the serialized result changed.
-  if path.len == 0:
+  if runtimeConfig.resultsUri.len == 0:
     return
   let scores = sim.playerResultsJson()
   if scores == lastScores:
     return
-  let dir = path.parentDir()
-  if dir.len > 0 and not dirExists(dir):
-    createDir(dir)
-  writeFile(path, scores & "\n")
-  if uri.len > 0:
-    writeCogameFileToUri(
-      uri,
-      path,
-      "application/json",
-      CogameResultsUriEnv
-    )
+  runtimeConfig.writeResults(scores & "\n")
   lastScores = scores
 
 proc keepPlayersAlive(sim: var SimServer) =
@@ -3112,10 +3100,9 @@ proc runServerLoop(
   host = DefaultHost,
   port = DefaultPort,
   seed = 0x1F1B10C,
-  saveScoresPath = "",
-  saveScoresUri = "",
   maxTicks = DefaultMaxTicks,
-  maxGames = 0
+  maxGames = 0,
+  runtimeConfig = RuntimeConfig()
 ) =
   initAppState()
 
@@ -3138,7 +3125,6 @@ proc runServerLoop(
     runTicks = 0
     gamesFinished = 0
     lastScores = ""
-  sim.writeScoresIfChanged(saveScoresPath, lastScores, saveScoresUri)
   echo "Infinite Blocks config: maxTicks=", maxTicks.tickLimitText(),
     " maxGames=", maxGames.tickLimitText(),
     " targetFps=", TargetFps
@@ -3214,6 +3200,7 @@ proc runServerLoop(
             globalStates.add(state)
 
     if shouldReset:
+      sim.writeScoresIfChanged(lastScores, runtimeConfig)
       inc currentSeed
       sim = initSimServer(currentSeed)
       runTicks = 0
@@ -3259,7 +3246,6 @@ proc runServerLoop(
       let rewardPacket = sim.buildRewardPacket()
       sendRewardPackets(rewardViewers, rewardPacket)
       sim.sendGlobalMapPackets(globalViewers, globalStates)
-      sim.writeScoresIfChanged(saveScoresPath, lastScores, saveScoresUri)
       runFrameLimiter(lastTick)
       continue
 
@@ -3300,14 +3286,17 @@ proc runServerLoop(
     if runTicks mod GlobalSendInterval == 0:
       sim.sendGlobalMapPackets(globalViewers, globalStates)
 
-    sim.writeScoresIfChanged(saveScoresPath, lastScores, saveScoresUri)
     if maxTicks > 0 and runTicks >= maxTicks:
       inc gamesFinished
       echo "Infinite Blocks maxTicks reached: ticks=", runTicks,
         " gamesFinished=", gamesFinished,
         " maxGames=", maxGames.tickLimitText()
+      sim.writeScoresIfChanged(lastScores, runtimeConfig)
       if maxGames > 0 and gamesFinished >= maxGames:
         echo "Infinite Blocks maxGames reached, shutting down."
+        runtimeConfig.writeReplay(
+          "{\"format\":\"infinite-blocks-replay-v1\"}\n"
+        )
         httpServer.close()
         joinThread(serverThread)
         break
@@ -3316,14 +3305,6 @@ proc runServerLoop(
           appState.resetRequested = true
 
     runFrameLimiter(lastTick)
-
-proc readConfigString(node: JsonNode, name: string, value: var string) =
-  if not node.hasKey(name):
-    return
-  let item = node[name]
-  if item.kind != JString:
-    raise newException(ValueError, "Config field " & name & " must be a string.")
-  value = item.getStr()
 
 proc readConfigInt(node: JsonNode, name: string, value: var int) =
   if not node.hasKey(name):
@@ -3336,68 +3317,37 @@ proc readConfigInt(node: JsonNode, name: string, value: var int) =
 proc update(config: var RunConfig, jsonText: string) =
   if jsonText.len == 0:
     return
-  let node = parseJson(jsonText)
+  var node: JsonNode
+  try:
+    node = fromJson(jsonText)
+  except jsony.JsonError as e:
+    raise newException(ValueError, "Could not parse config JSON: " & e.msg)
   if node.kind != JObject:
     raise newException(ValueError, "Config must be a JSON object.")
-  node.readConfigString("address", config.address)
-  node.readConfigInt("port", config.port)
   node.readConfigInt("seed", config.seed)
-  node.readConfigString("saveScores", config.saveScoresPath)
-  node.readConfigString("saveScoresPath", config.saveScoresPath)
-  node.readConfigString("save-scores", config.saveScoresPath)
-  node.readConfigString("save-scores-path", config.saveScoresPath)
   node.readConfigInt("maxTicks", config.maxTicks)
   node.readConfigInt("max-ticks", config.maxTicks)
   node.readConfigInt("maxGames", config.maxGames)
   node.readConfigInt("max-games", config.maxGames)
 
-proc defaultScoresPath(): string =
-  ## Returns the configured score save path from the environment.
-  outputPathFromCogameEnv(CogameResultsUriEnv, "scores.json")
-
 when isMainModule:
+  let runtimeConfig = readRuntimeConfig(DefaultHost, DefaultPort)
   var
     config = RunConfig(
-      address: cogameHost(DefaultHost),
-      port: cogamePort(DefaultPort),
+      address: runtimeConfig.host,
+      port: runtimeConfig.port,
       seed: 0x1F1B10C,
-      saveScoresPath: defaultScoresPath(),
       maxTicks: DefaultMaxTicks,
       maxGames: 0
     )
-    configJson = ""
-    configPath = pathFromCogameEnv(CogameConfigUriEnv)
-  for kind, key, val in getopt():
-    case kind
-    of cmdLongOption:
-      case key
-      of "address": config.address = val
-      of "port": config.port = parseInt(val)
-      of "seed": config.seed = parseInt(val)
-      of "config": configJson = val
-      of "config-file": configPath = val
-      of "save-scores", "save-scores-path", "saveScoresPath":
-        config.saveScoresPath = val
-      of "max-ticks", "maxTicks":
-        config.maxTicks = parseInt(val)
-      of "max-games", "maxGames":
-        config.maxGames = parseInt(val)
-      else: discard
-    else: discard
-  if configPath.len > 0:
-    config.update(readFile(configPath))
-  if configJson.len > 0:
-    config.update(configJson)
-  if configPath.len > 0:
-    echo "Using config file: " & configPath
-  if config.saveScoresPath.len > 0:
-    echo "Using results save file: " & config.saveScoresPath
+  config.update(runtimeConfig.config)
+  if runtimeConfig.resultsUri.len > 0:
+    echo "Using results target: " & runtimeConfig.resultsUri
   runServerLoop(
     config.address,
     config.port,
     seed = config.seed,
-    saveScoresPath = config.saveScoresPath,
-    saveScoresUri = getEnv(CogameResultsUriEnv),
     maxTicks = config.maxTicks,
-    maxGames = config.maxGames
+    maxGames = config.maxGames,
+    runtimeConfig = runtimeConfig
   )
