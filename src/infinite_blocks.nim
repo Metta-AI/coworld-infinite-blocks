@@ -2635,8 +2635,7 @@ proc writeScoresIfChanged(
       uri,
       path,
       "application/json",
-      CogameResultsUriEnv,
-      cogameHttpMethodForUri(uri, CogameResultsMethodEnv)
+      CogameResultsUriEnv
     )
   lastScores = scores
 
