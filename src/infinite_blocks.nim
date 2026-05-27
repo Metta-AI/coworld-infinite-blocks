@@ -2,7 +2,7 @@ import
   std/[algorithm, json, locks, monotimes, os, parseopt, random, strutils,
     tables, times],
   mummy, pixie, supersnappy,
-  bitworld/aseprite, bitworld/client, bitworld/cogame_runtime, bitworld/pixelfonts, bitworld/protocol, bitworld/server
+  bitworld/aseprite, bitworld/client, bitworld/runtime, bitworld/pixelfonts, bitworld/protocol, bitworld/server
 
 const
   BoardWidthCells = 125
@@ -2617,7 +2617,8 @@ proc playerResultsJson(sim: SimServer): string =
 proc writeScoresIfChanged(
   sim: SimServer,
   path: string,
-  lastScores: var string
+  lastScores: var string,
+  uri = ""
 ) =
   ## Writes scores when the serialized result changed.
   if path.len == 0:
@@ -2629,6 +2630,14 @@ proc writeScoresIfChanged(
   if dir.len > 0 and not dirExists(dir):
     createDir(dir)
   writeFile(path, scores & "\n")
+  if uri.len > 0:
+    writeCogameFileToUri(
+      uri,
+      path,
+      "application/json",
+      CogameResultsUriEnv,
+      cogameHttpMethodForUri(uri, CogameResultsMethodEnv)
+    )
   lastScores = scores
 
 proc keepPlayersAlive(sim: var SimServer) =
@@ -3105,6 +3114,7 @@ proc runServerLoop(
   port = DefaultPort,
   seed = 0x1F1B10C,
   saveScoresPath = "",
+  saveScoresUri = "",
   maxTicks = DefaultMaxTicks,
   maxGames = 0
 ) =
@@ -3129,7 +3139,7 @@ proc runServerLoop(
     runTicks = 0
     gamesFinished = 0
     lastScores = ""
-  sim.writeScoresIfChanged(saveScoresPath, lastScores)
+  sim.writeScoresIfChanged(saveScoresPath, lastScores, saveScoresUri)
   echo "Infinite Blocks config: maxTicks=", maxTicks.tickLimitText(),
     " maxGames=", maxGames.tickLimitText(),
     " targetFps=", TargetFps
@@ -3250,7 +3260,7 @@ proc runServerLoop(
       let rewardPacket = sim.buildRewardPacket()
       sendRewardPackets(rewardViewers, rewardPacket)
       sim.sendGlobalMapPackets(globalViewers, globalStates)
-      sim.writeScoresIfChanged(saveScoresPath, lastScores)
+      sim.writeScoresIfChanged(saveScoresPath, lastScores, saveScoresUri)
       runFrameLimiter(lastTick)
       continue
 
@@ -3291,7 +3301,7 @@ proc runServerLoop(
     if runTicks mod GlobalSendInterval == 0:
       sim.sendGlobalMapPackets(globalViewers, globalStates)
 
-    sim.writeScoresIfChanged(saveScoresPath, lastScores)
+    sim.writeScoresIfChanged(saveScoresPath, lastScores, saveScoresUri)
     if maxTicks > 0 and runTicks >= maxTicks:
       inc gamesFinished
       echo "Infinite Blocks maxTicks reached: ticks=", runTicks,
@@ -3344,7 +3354,7 @@ proc update(config: var RunConfig, jsonText: string) =
 
 proc defaultScoresPath(): string =
   ## Returns the configured score save path from the environment.
-  pathFromCogameEnv(CogameResultsUriEnv)
+  outputPathFromCogameEnv(CogameResultsUriEnv, "scores.json")
 
 when isMainModule:
   var
@@ -3388,6 +3398,7 @@ when isMainModule:
     config.port,
     seed = config.seed,
     saveScoresPath = config.saveScoresPath,
+    saveScoresUri = getEnv(CogameResultsUriEnv),
     maxTicks = config.maxTicks,
     maxGames = config.maxGames
   )
