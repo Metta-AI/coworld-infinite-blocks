@@ -27,8 +27,7 @@ ENV PATH="/root/.nimby/nim/bin:$PATH"
 
 WORKDIR /workspace/cogame-infinite-blocks
 COPY nimby.lock .
-RUN nimby sync nimby.lock && \
-  nimby install https://github.com/Metta-AI/bitworld.git
+RUN nimby --global sync nimby.lock
 
 COPY . .
 RUN nim c \
