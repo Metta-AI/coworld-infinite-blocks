@@ -7,7 +7,6 @@ when defined(gui):
   import pixie, bitworld/scales, silky, windy
 
 const
-  CoworldPlayerWsEnv = "COWORLD_PLAYER_WS_URL"
   EngineWsEnv = "COGAMES_ENGINE_WS_URL"
   DefaultPlayerAddress = "ws://localhost:8080/player"
   PlayerWebSocketPath = "/player"
@@ -1782,9 +1781,7 @@ proc redactedUrl(url: string): string =
 
 proc playerAddressFromEnv(): string =
   ## Returns the injected player websocket URL.
-  result = getEnv(CoworldPlayerWsEnv)
-  if result.len == 0:
-    result = getEnv(EngineWsEnv)
+  result = getEnv(EngineWsEnv)
 
 proc initBot(): Bot =
   ## Builds the initial bot state.
