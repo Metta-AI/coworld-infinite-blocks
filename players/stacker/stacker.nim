@@ -21,14 +21,20 @@ const
   DebugInterval = 60
   BrightMinChannel = 30
   BrightMaxChannel = 70
-  SupportedGapBonus = 1400
-  PocketFillBonus = 2400
   HoleReductionBonus = 4500
   HoleIncreasePenalty = 5200
   RowCompletionBonus = 24000
-  OutsideLanePenalty = 750
   BumpinessPenalty = 80
   HeightPenalty = 10
+  DropSearchRadius = 7
+  DropHoldRadius = 10
+  MinDropScore = 10000
+  NoGapBonus = 7000
+  SupportBonus = 1800
+  NewGapPenalty = 9000
+  LocalBumpinessPenalty = 180
+  LowPlacementBonus = 70
+  ReachPenalty = 120
   MaxFlipAttempts = 16
 
 when defined(gui):
@@ -86,6 +92,10 @@ type
     PieceBox
     PieceFlat
 
+  BotMode = enum
+    BotExplore
+    BotDrop
+
   ActivePiece = object
     found: bool
     kind: PieceKind
@@ -123,6 +133,8 @@ type
     logicalHeight: int
     target: Placement
     targetRow: int
+    mode: BotMode
+    explorationDirection: int
     intent: string
     flipAttempts: int
     trackingActive: bool
@@ -363,12 +375,9 @@ proc logicalMapScale(width, height: int): int =
   ## Returns the physical pixels used for one logical board cell.
   if width <= 0 or height <= 0:
     return 1
-  let
-    xScale = width div BoardWidthCells
-    yScale = height div BoardHeightCells
-  if xScale == yScale and xScale > 1 and
-      width mod BoardWidthCells == 0 and
-      height mod BoardHeightCells == 0:
+  let xScale = width div BoardWidthCells
+  if xScale > 1 and width mod BoardWidthCells == 0 and
+      height mod xScale == 0:
     return xScale
   if width >= BoardWidthCells * CellPixels and
       height >= BoardHeightCells * CellPixels:
@@ -737,8 +746,36 @@ proc ownMaskIndex(image: SpriteImage, x, y: int): int =
   ## Returns a flat pixel index for the map.
   y * image.width + x
 
+proc ownActiveGlobalCells(bot: Bot): seq[Cell] =
+  ## Returns logical global cells for the bot's active piece.
+  if not bot.hasOwnColor:
+    return
+  let scale =
+    if bot.mapScale > 0:
+      bot.mapScale
+    else:
+      logicalMapScale(bot.mapWidth, bot.mapHeight)
+  for item in bot.objects.values:
+    if item.z != 3:
+      continue
+    if item.spriteId notin bot.sprites:
+      continue
+    let color = bot.sprites[item.spriteId].representativeColor()
+    if not color.looksLikeOwnColor(bot.ownColor):
+      continue
+    let cell = item.logicalCell(scale)
+    if not result.containsCell(cell):
+      result.add(cell)
+
 proc activePiece(bot: Bot): ActivePiece =
   ## Finds the highest own-color connected component as the active piece.
+  var activeCells = bot.ownActiveGlobalCells()
+  if activeCells.len >= 3:
+    activeCells.sortCells()
+    result = activeCells.inferPieceFromComponent()
+    if result.found:
+      return
+
   let ownCells = bot.findOwnCells()
   if ownCells.len < 3 or bot.map.width <= 0 or bot.map.height <= 0:
     return
@@ -783,7 +820,7 @@ proc activePiece(bot: Bot): ActivePiece =
   if bestComponent.len < 3:
     return
   bestComponent.sortCells()
-  bestComponent.inferPieceFromComponent()
+  result = bestComponent.inferPieceFromComponent()
 
 proc occupiedMap(bot: var Bot, active: ActivePiece): seq[bool] =
   ## Builds an occupancy grid with the active piece removed.
@@ -865,65 +902,13 @@ proc supportedGap(
     return true
   occupied.occupiedAt(width, height, x, y + 1)
 
-proc cellGapScore(
-  occupied: openArray[bool],
-  width,
-  height,
-  x,
-  y: int
-): int =
-  ## Scores how much one candidate cell fills a useful gap.
-  if not occupied.supportedGap(width, height, x, y):
-    return 0
-  let
-    leftFilled = x == LaneStartX or
-      occupied.occupiedAt(width, height, x - 1, y)
-    rightFilled = x == LaneStartX + LineClearLength - 1 or
-      occupied.occupiedAt(width, height, x + 1, y)
-  result += SupportedGapBonus
-  if leftFilled and rightFilled:
-    result += PocketFillBonus
-  elif leftFilled or rightFilled:
-    result += PocketFillBonus div 2
-
-proc laneHoles(occupied: openArray[bool], width, height: int): int =
-  ## Counts covered holes in the target lane.
-  let bottomRow = height.playfieldBottom
-  for x in LaneStartX ..< LaneStartX + LineClearLength:
-    var seenBlock = false
-    for y in 0 .. bottomRow:
-      if occupied.occupiedAt(width, height, x, y):
-        seenBlock = true
-      elif seenBlock:
-        inc result
-
 proc columnTop(occupied: openArray[bool], width, height, x: int): int =
-  ## Returns the first occupied row in one target lane column.
+  ## Returns the first occupied row in one board column.
   let bottomRow = height.playfieldBottom
   for y in 0 .. bottomRow:
     if occupied.occupiedAt(width, height, x, y):
       return y
   bottomRow + 1
-
-proc aggregateLaneHeight(
-  occupied: openArray[bool],
-  width,
-  height: int
-): int =
-  ## Counts the total pile height across the target lane.
-  let bottomRow = height.playfieldBottom
-  for x in LaneStartX ..< LaneStartX + LineClearLength:
-    result += bottomRow + 1 - occupied.columnTop(width, height, x)
-
-proc laneBumpiness(occupied: openArray[bool], width, height: int): int =
-  ## Counts adjacent column height differences in the target lane.
-  let bottomRow = height.playfieldBottom
-  var previous = bottomRow + 1 -
-    occupied.columnTop(width, height, LaneStartX)
-  for x in LaneStartX + 1 ..< LaneStartX + LineClearLength:
-    let current = bottomRow + 1 - occupied.columnTop(width, height, x)
-    result += abs(current - previous)
-    previous = current
 
 proc rowPotential(
   occupied: openArray[bool],
@@ -961,6 +946,76 @@ proc placedCells(x, y: int, kind: PieceKind, rotation: int): seq[Cell] =
   for cell in pieceCells(kind, rotation):
     result.add(Cell(x: x + cell.x, y: y + cell.y))
 
+proc rowBestRun(occupied: openArray[bool], width, height, row: int): int =
+  ## Returns the longest occupied run on one row.
+  if row < 0 or row >= height:
+    return
+  var run = 0
+  for x in 0 ..< width:
+    if occupied.occupiedAt(width, height, x, row):
+      inc run
+      result = max(result, run)
+    else:
+      run = 0
+
+proc holeCount(
+  occupied: openArray[bool],
+  width,
+  height,
+  startX,
+  endX: int
+): int =
+  ## Counts covered empty cells across a column span.
+  let
+    firstX = max(0, startX)
+    lastX = min(width - 1, endX)
+    bottomRow = height.playfieldBottom
+  if firstX > lastX:
+    return
+  for x in firstX .. lastX:
+    var seenBlock = false
+    for y in 0 .. bottomRow:
+      if occupied.occupiedAt(width, height, x, y):
+        seenBlock = true
+      elif seenBlock:
+        inc result
+
+proc spanBumpiness(
+  occupied: openArray[bool],
+  width,
+  height,
+  startX,
+  endX: int
+): int =
+  ## Counts adjacent surface changes across a column span.
+  let
+    firstX = max(0, startX)
+    lastX = min(width - 1, endX)
+    bottomRow = height.playfieldBottom
+  if firstX >= lastX:
+    return
+  var previous = bottomRow + 1 - occupied.columnTop(width, height, firstX)
+  for x in firstX + 1 .. lastX:
+    let current = bottomRow + 1 - occupied.columnTop(width, height, x)
+    result += abs(current - previous)
+    previous = current
+
+proc placementGapCount(
+  occupied: openArray[bool],
+  width,
+  height: int,
+  cells: openArray[Cell]
+): int =
+  ## Counts empty cells directly under a placed piece.
+  let bottomRow = height.playfieldBottom
+  for cell in cells:
+    if cell.y >= bottomRow:
+      continue
+    if cells.containsCell(Cell(x: cell.x, y: cell.y + 1)):
+      continue
+    if not occupied.occupiedAt(width, height, cell.x, cell.y + 1):
+      inc result
+
 proc scorePlacement(
   occupied: openArray[bool],
   width,
@@ -969,52 +1024,78 @@ proc scorePlacement(
   placement: Placement,
   targetRow: int
 ): int =
-  ## Scores a candidate by filling gaps and avoiding covered holes.
+  ## Scores a candidate by support, flatness, depth, and holes.
   var test = newSeq[bool](occupied.len)
   for i in 0 ..< occupied.len:
     test[i] = occupied[i]
-  let
-    beforeHoles = occupied.laneHoles(width, height)
-    beforeBumpiness = occupied.laneBumpiness(width, height)
-    beforeHeight = occupied.aggregateLaneHeight(width, height)
   let cells = placedCells(
     placement.x,
     placement.y,
     active.kind,
     placement.rotation
   )
+  var
+    minX = high(int)
+    maxX = low(int)
+    maxY = low(int)
+    rows: seq[int]
   for cell in cells:
-    if cell.x >= 0 and cell.y >= 0 and cell.x < width and cell.y < height:
-      test[cell.y * width + cell.x] = true
-      if cell.x.inLane:
-        result += 300
-        result += occupied.cellGapScore(width, height, cell.x, cell.y)
-      else:
-        result -= OutsideLanePenalty
-      result -= abs(cell.y - targetRow) * 6
-      result += cell.y div 2
-
-  var rows: seq[int]
-  for cell in cells:
-    if cell.y < 0 or cell.y >= height - 1:
-      continue
-    if cell.y in rows:
-      continue
-    rows.add(cell.y)
-    let
-      before = occupied.rowCount(width, cell.y, LaneStartX)
-      after = test.rowCount(width, cell.y, LaneStartX)
-    if after >= LineClearLength:
-      result += RowCompletionBonus
-    if cell.y == targetRow:
-      result += (after - before) * 800
-    result += (after - before) * 950
-    result += after * 80
+    if cell.x < 0 or cell.x >= width or cell.y < 0 or cell.y >= height:
+      return low(int)
+    test[cell.y * width + cell.x] = true
+    minX = min(minX, cell.x)
+    maxX = max(maxX, cell.x)
+    maxY = max(maxY, cell.y)
+    if cell.y notin rows:
+      rows.add(cell.y)
 
   let
-    afterHoles = test.laneHoles(width, height)
-    afterBumpiness = test.laneBumpiness(width, height)
-    afterHeight = test.aggregateLaneHeight(width, height)
+    spanStart = minX - 1
+    spanEnd = maxX + 1
+    bottomRow = height.playfieldBottom
+    beforeHoles = occupied.holeCount(width, height, spanStart, spanEnd)
+    afterHoles = test.holeCount(width, height, spanStart, spanEnd)
+    beforeBumpiness = occupied.spanBumpiness(
+      width,
+      height,
+      spanStart,
+      spanEnd
+    )
+    afterBumpiness = test.spanBumpiness(width, height, spanStart, spanEnd)
+    gapCount = occupied.placementGapCount(width, height, cells)
+
+  if gapCount == 0:
+    result += NoGapBonus
+  else:
+    result -= gapCount * NewGapPenalty
+
+  for cell in cells:
+    let
+      belowFilled = cell.y >= bottomRow or
+        cells.containsCell(Cell(x: cell.x, y: cell.y + 1)) or
+        occupied.occupiedAt(width, height, cell.x, cell.y + 1)
+      leftFilled = cells.containsCell(Cell(x: cell.x - 1, y: cell.y)) or
+        occupied.occupiedAt(width, height, cell.x - 1, cell.y)
+      rightFilled = cells.containsCell(Cell(x: cell.x + 1, y: cell.y)) or
+        occupied.occupiedAt(width, height, cell.x + 1, cell.y)
+    if belowFilled:
+      result += SupportBonus
+    if leftFilled:
+      result += SupportBonus div 6
+    if rightFilled:
+      result += SupportBonus div 6
+    if belowFilled and leftFilled and rightFilled:
+      result += SupportBonus div 2
+    result += cell.y * LowPlacementBonus
+
+  for row in rows:
+    let
+      beforeRun = occupied.rowBestRun(width, height, row)
+      afterRun = test.rowBestRun(width, height, row)
+    if afterRun >= LineClearLength:
+      result += RowCompletionBonus
+    result += (afterRun - beforeRun) * 900
+
   if afterHoles <= beforeHoles:
     result += (beforeHoles - afterHoles) * HoleReductionBonus
   else:
@@ -1023,22 +1104,38 @@ proc scorePlacement(
     result += (beforeBumpiness - afterBumpiness) * BumpinessPenalty
   else:
     result -= (afterBumpiness - beforeBumpiness) * BumpinessPenalty
-  result -= max(0, afterHeight - beforeHeight) * HeightPenalty
+  result -= afterBumpiness * LocalBumpinessPenalty
+  result -= max(0, bottomRow - maxY) * HeightPenalty
+  result -= abs(maxY - targetRow) * 3
+  result -= abs(active.originX - placement.x) * ReachPenalty
 
 proc choosePlacement(
   bot: var Bot,
   active: ActivePiece,
-  requiredRotation = -1
+  requiredRotation = -1,
+  centerX = 0,
+  radius = -1
 ): Placement =
   ## Chooses where the current piece should land.
   if not active.found or bot.map.pixels.len == 0:
     return
   let occupied = bot.occupiedMap(active)
   bot.targetRow = occupied.targetHoleRow(bot.map.width, bot.map.height)
+  let
+    startX =
+      if radius >= 0:
+        max(-4, centerX - radius)
+      else:
+        -4
+    endX =
+      if radius >= 0:
+        min(bot.map.width + 4, centerX + radius)
+      else:
+        bot.map.width + 4
   for rotation in 0 .. 3:
     if requiredRotation >= 0 and rotation != requiredRotation:
       continue
-    for x in LaneStartX - 6 .. LaneStartX + LineClearLength + 4:
+    for x in startX .. endX:
       var y = max(0, active.originY)
       if not occupied.canPlace(
         bot.map.width,
@@ -1193,27 +1290,38 @@ proc scoreVisiblePlacement(
     active.kind,
     placement.rotation
   )
+  var gapCount = 0
   for cell in cells:
     if cell.x < 0 or cell.x >= width or cell.y < 0 or cell.y >= height:
       result -= 5000
       continue
     let
       belowFilled = cell.y == height - 1 or
+        cells.containsCell(Cell(x: cell.x, y: cell.y + 1)) or
         occupied.viewportOccupiedAt(width, height, cell.x, cell.y + 1)
       leftFilled = cell.x == 0 or
+        cells.containsCell(Cell(x: cell.x - 1, y: cell.y)) or
         occupied.viewportOccupiedAt(width, height, cell.x - 1, cell.y)
       rightFilled = cell.x == width - 1 or
+        cells.containsCell(Cell(x: cell.x + 1, y: cell.y)) or
         occupied.viewportOccupiedAt(width, height, cell.x + 1, cell.y)
     test[viewportMaskIndex(width, cell.x, cell.y)] = true
     if belowFilled:
-      result += 1400
+      result += SupportBonus
+    else:
+      inc gapCount
     if leftFilled:
-      result += 240
+      result += SupportBonus div 6
     if rightFilled:
-      result += 240
+      result += SupportBonus div 6
     if belowFilled and leftFilled and rightFilled:
-      result += 1200
-    result += cell.y * 24
+      result += SupportBonus div 2
+    result += cell.y * LowPlacementBonus
+
+  if gapCount == 0:
+    result += NoGapBonus
+  else:
+    result -= gapCount * NewGapPenalty
 
   for y in 0 ..< height:
     var filled = 0
@@ -1223,12 +1331,14 @@ proc scoreVisiblePlacement(
     result += filled * filled
     if filled >= min(LineClearLength, width):
       result += 5000
-  result -= abs(active.originX - placement.x) * 20
+  result -= abs(active.originX - placement.x) * ReachPenalty
 
 proc chooseVisiblePlacement(
   bot: var Bot,
   active: ActivePiece,
-  requiredRotation = -1
+  requiredRotation = -1,
+  centerX = 0,
+  radius = -1
 ): Placement =
   ## Chooses a landing spot using only the current visible viewport.
   if not active.found or bot.frameWidth <= 0 or bot.frameHeight <= 0:
@@ -1236,10 +1346,21 @@ proc chooseVisiblePlacement(
   let dims = bot.viewportDimensions()
   let occupied = bot.viewportOccupancy(active, dims.width, dims.height)
   bot.targetRow = dims.height - 1
+  let
+    startX =
+      if radius >= 0:
+        max(-3, centerX - radius)
+      else:
+        -3
+    endX =
+      if radius >= 0:
+        min(dims.width, centerX + radius)
+      else:
+        dims.width
   for rotation in 0 .. 3:
     if requiredRotation >= 0 and rotation != requiredRotation:
       continue
-    for x in -3 .. dims.width:
+    for x in startX .. endX:
       var y = max(0, active.originY)
       if not occupied.canPlaceViewport(
         dims.width,
@@ -1275,6 +1396,82 @@ proc chooseVisiblePlacement(
         result = candidate
   bot.target = result
 
+proc horizontalMask(direction: int): uint8 =
+  ## Returns the button mask for one horizontal direction.
+  if direction < 0:
+    ButtonLeft
+  else:
+    ButtonRight
+
+proc canShiftActive(bot: Bot, active: ActivePiece, direction: int): bool =
+  ## Returns true when the active piece can move one cell sideways.
+  if direction == 0:
+    return true
+  if bot.logicalTerrain.len != bot.logicalWidth * bot.logicalHeight or
+      bot.logicalWidth <= 0 or bot.logicalHeight <= 0:
+    return true
+  bot.logicalTerrain.canPlace(
+    bot.logicalWidth,
+    bot.logicalHeight,
+    active.originX + direction,
+    active.originY,
+    active.kind,
+    active.rotation
+  )
+
+proc canShiftVisibleActive(
+  bot: Bot,
+  active: ActivePiece,
+  direction: int
+): bool =
+  ## Returns true when the visible piece can move sideways.
+  if direction == 0:
+    return true
+  if bot.frameWidth <= 0 or bot.frameHeight <= 0:
+    return true
+  let
+    dims = bot.viewportDimensions()
+    occupied = bot.viewportOccupancy(active, dims.width, dims.height)
+  occupied.canPlaceViewport(
+    dims.width,
+    dims.height,
+    active.originX + direction,
+    active.originY,
+    active.kind,
+    active.rotation
+  )
+
+proc explorationMask(
+  bot: var Bot,
+  active: ActivePiece,
+  visiblePlan = false
+): uint8 =
+  ## Flies sideways until a good local drop appears.
+  if bot.explorationDirection == 0:
+    bot.explorationDirection = 1
+  let forwardOpen =
+    if visiblePlan:
+      bot.canShiftVisibleActive(active, bot.explorationDirection)
+    else:
+      bot.canShiftActive(active, bot.explorationDirection)
+  if not forwardOpen:
+    let reverseOpen =
+      if visiblePlan:
+        bot.canShiftVisibleActive(active, -bot.explorationDirection)
+      else:
+        bot.canShiftActive(active, -bot.explorationDirection)
+    if reverseOpen:
+      bot.explorationDirection = -bot.explorationDirection
+    else:
+      bot.intent = "explore blocked"
+      return ButtonDown
+  bot.intent =
+    if bot.explorationDirection < 0:
+      "explore left"
+    else:
+      "explore right"
+  bot.explorationDirection.horizontalMask()
+
 proc maskSummary(mask: uint8): string =
   ## Returns a compact debug string for pressed controls.
   if (mask and ButtonUp) != 0:
@@ -1299,39 +1496,94 @@ proc decideMask(bot: var Bot): uint8 =
   if not bot.hasOwnColor:
     bot.intent = "waiting"
     bot.flipAttempts = 0
+    bot.mode = BotExplore
     bot.trackingActive = false
     return ButtonDown
-  var active = bot.activeViewportPiece()
-  var visiblePlan = true
+
+  var active = bot.activePiece()
+  let globalPlan = active.found
   if not active.found:
-    active = bot.activePiece()
-    visiblePlan = false
+    active = bot.activeViewportPiece()
   if not active.found:
     bot.intent = "finding piece"
     bot.flipAttempts = 0
+    bot.mode = BotExplore
     bot.trackingActive = false
     return ButtonDown
   if not bot.trackingActive or active.originY < bot.trackedActiveY - 4:
     bot.flipAttempts = 0
+    bot.mode = BotExplore
     bot.trackingActive = true
   bot.trackedActiveY = active.originY
   bot.active = active
-  var placement =
-    if visiblePlan:
-      bot.chooseVisiblePlacement(active)
-    else:
-      bot.choosePlacement(active)
+
+  var placement: Placement
+  if globalPlan:
+    if bot.mode == BotDrop:
+      placement = bot.choosePlacement(
+        active,
+        centerX = active.originX,
+        radius = DropHoldRadius
+      )
+      if not placement.found or placement.score < MinDropScore div 2:
+        bot.mode = BotExplore
+    if bot.mode == BotExplore:
+      placement = bot.choosePlacement(
+        active,
+        centerX = active.originX,
+        radius = DropSearchRadius
+      )
+      if placement.found and placement.score >= MinDropScore:
+        bot.mode = BotDrop
+      else:
+        return bot.explorationMask(active)
+  else:
+    if bot.mode == BotDrop:
+      placement = bot.chooseVisiblePlacement(
+        active,
+        centerX = active.originX,
+        radius = DropHoldRadius
+      )
+      if not placement.found or placement.score < MinDropScore div 2:
+        bot.mode = BotExplore
+    if bot.mode == BotExplore:
+      placement = bot.chooseVisiblePlacement(
+        active,
+        centerX = active.originX,
+        radius = DropSearchRadius
+      )
+      if placement.found and placement.score >= MinDropScore:
+        bot.mode = BotDrop
+      else:
+        return bot.explorationMask(active, visiblePlan = true)
+
   if not placement.found:
-    bot.intent = "dropping"
-    return ButtonDown
+    bot.intent =
+      if globalPlan:
+        "explore no fit"
+      else:
+        "explore visible"
+    if globalPlan:
+      return bot.explorationMask(active)
+    return bot.explorationMask(active, visiblePlan = true)
 
   if active.rotation != placement.rotation:
     if bot.flipAttempts >= MaxFlipAttempts:
       let currentPlacement =
-        if visiblePlan:
-          bot.chooseVisiblePlacement(active, active.rotation)
+        if globalPlan:
+          bot.choosePlacement(
+            active,
+            active.rotation,
+            active.originX,
+            DropHoldRadius
+          )
         else:
-          bot.choosePlacement(active, active.rotation)
+          bot.chooseVisiblePlacement(
+            active,
+            active.rotation,
+            active.originX,
+            DropHoldRadius
+          )
       if currentPlacement.found:
         placement = currentPlacement
         bot.intent = "place current flip"
@@ -1349,17 +1601,35 @@ proc decideMask(bot: var Bot): uint8 =
     bot.flipAttempts = min(bot.flipAttempts, MaxFlipAttempts)
 
   if active.originX < placement.x:
-    bot.intent = "fly right"
+    let blocked =
+      if globalPlan:
+        not bot.canShiftActive(active, 1)
+      else:
+        not bot.canShiftVisibleActive(active, 1)
+    if blocked:
+      bot.mode = BotExplore
+      bot.explorationDirection = -1
+      return bot.explorationMask(active, visiblePlan = not globalPlan)
+    bot.intent = "aim right"
     return ButtonRight
   if active.originX > placement.x:
-    bot.intent = "fly left"
+    let blocked =
+      if globalPlan:
+        not bot.canShiftActive(active, -1)
+      else:
+        not bot.canShiftVisibleActive(active, -1)
+    if blocked:
+      bot.mode = BotExplore
+      bot.explorationDirection = 1
+      return bot.explorationMask(active, visiblePlan = not globalPlan)
+    bot.intent = "aim left"
     return ButtonLeft
 
   bot.intent =
-    if visiblePlan:
-      "plug visible hole"
+    if globalPlan:
+      "drop target"
     else:
-      "fill row " & $bot.targetRow
+      "plug visible hole"
   result = ButtonDown
   if active.originY >= placement.y - 1:
     result = result or ButtonSelect
@@ -1371,6 +1641,7 @@ proc echoDebug(bot: Bot, mask: uint8) =
   echo "step=", bot.frameTick,
     " keys=", mask.maskSummary(),
     " intent=", bot.intent,
+    " mode=", bot.mode,
     " targetRow=", bot.targetRow,
     " target=", bot.target.x, ",", bot.target.y,
     " rot=", bot.target.rotation,
@@ -1791,6 +2062,8 @@ proc initBot(): Bot =
   result.objects = initTable[int, GlobalObject]()
   result.lastMask = 0xff'u8
   result.targetRow = BaseTerrainY - 1
+  result.mode = BotExplore
+  result.explorationDirection = 1
 
 proc runBot(
   address = DefaultPlayerAddress,

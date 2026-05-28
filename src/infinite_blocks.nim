@@ -17,8 +17,8 @@ const
   PieceSpawnNudgeCells = 1
   HorizontalScrollMargin = 32
   VerticalScrollMargin = 64
-  BaseFallInterval = 40
-  SoftFallInterval = 10
+  GravityPixelsPerTick = 1
+  SoftGravityPixelsPerTick = 3
   MoveRepeatInterval = 5
   LockDelayTicks = 20
   LineClearLength = 8
@@ -26,6 +26,7 @@ const
   BackgroundColor = 0'u8
   ClearFlashTicks = 20
   ClearPauseTicks = 12
+  MaxAvalancheSteps = BoardHeightCells * 2
   TargetFps = 60
   DefaultMaxTicks = TargetFps * 60 * 5
   GlobalSendInterval = 6
@@ -51,6 +52,7 @@ const
   ScorePanelDigitSpriteBase = 52000
   ScorePanelChipSpriteBase = 52100
   ScorePanelNameSpriteBase = 53100
+  ScorePanelSelectedNameSpriteBase = 54100
   ScorePanelChipObjectBase = 52000
   ScorePanelDigitObjectBase = 53000
   ScorePanelNameObjectBase = 56000
@@ -91,6 +93,7 @@ const
   ScorePanelMaxScoreChars = 16
   ScorePanelMaxRows = 128
   ScorePanelColor = (r: 255'u8, g: 255'u8, b: 255'u8, a: 255'u8)
+  ScorePanelSelectedColor = (r: 255'u8, g: 245'u8, b: 140'u8, a: 255'u8)
   PlayerColors = [4'u8, 5'u8, 6'u8, 7'u8, 8'u8, 9'u8, 10'u8, 11'u8, 12'u8, 13'u8, 14'u8, 15'u8]
 
 type
@@ -145,9 +148,8 @@ type
     rotation: int
     cellX: int
     cellY: int
+    pixelY: int
     moveTicksX: int
-    moveTicksY: int
-    fallTicks: int
     lockTicks: int
     deepestCellY: int
     cameraX: int
@@ -191,6 +193,12 @@ type
     sentTerrainSprites: bool
     sentClearSprites: bool
     sentScorePanelDigits: bool
+    sentSelectedScorePanelPlayers: seq[int]
+    selectedPlayerIndex: int
+    viewPlayerIndex: int
+    pendingScorePanelClick: bool
+    pendingScorePanelClickX: int
+    pendingScorePanelClickY: int
 
   SocketKind = enum
     SocketUnknown
@@ -222,13 +230,30 @@ type
 
 proc newGlobalViewerState(): GlobalViewerState =
   ## Allocates one mutable global protocol viewer state.
-  GlobalViewerState()
+  GlobalViewerState(
+    selectedPlayerIndex: -1,
+    viewPlayerIndex: -1
+  )
 
 proc viewerState(state: GlobalViewerState): GlobalViewerState =
   ## Returns an existing viewer state or allocates a new one.
   if state == nil:
     return newGlobalViewerState()
   state
+
+proc resetProtocolState(state: GlobalViewerState) =
+  ## Clears cached protocol output when a viewer changes modes.
+  if state == nil:
+    return
+  state.initialized = false
+  state.sentOwners.setLen(0)
+  state.sentNameLabels.setLen(0)
+  state.sentScorePanelPlayers.setLen(0)
+  state.sentSelectedScorePanelPlayers.setLen(0)
+  state.sentBackgroundSprite = false
+  state.sentTerrainSprites = false
+  state.sentClearSprites = false
+  state.sentScorePanelDigits = false
 
 proc gameDataDir(): string =
   ## Returns the Infinite Blocks data directory.
@@ -260,6 +285,15 @@ proc boardIndex(x, y: int): int =
 proc inBoardBounds(x, y: int): bool =
   ## Returns true when one logical cell is inside the board.
   x >= 0 and y >= 0 and x < BoardWidthCells and y < BoardHeightCells
+
+proc setPixelY(player: var Player, pixelY: int) =
+  ## Sets the fine Y position and matching logical row.
+  player.pixelY = pixelY
+  player.cellY = pixelY div CellPixels
+
+proc piecePixelY(player: Player, cell: BlockOffset): int =
+  ## Returns the fine pixel Y position for one piece cell.
+  player.pixelY + cell.y * CellPixels
 
 proc worldClampPixel(x, maxValue: int): int =
   ## Clamps one world pixel coordinate against a non-negative limit.
@@ -522,6 +556,36 @@ proc scorePanelNameWidth(sim: SimServer, order: openArray[int]): int =
       sim.textFont.textWidth(sim.players[playerIndex].scorePanelNameText())
     )
 
+proc scorePanelRowHeight(sim: SimServer): int =
+  ## Returns the score panel row height.
+  max(sim.textFont.lineHeight(), ScorePanelPipSize)
+
+proc scorePanelNameX(sim: SimServer, order: openArray[int]): int =
+  ## Returns the score panel name column X coordinate.
+  let
+    scoreColumnWidth = sim.scorePanelScoreWidth(order)
+    scoreX = ScorePanelPipSize + ScorePanelPipGapX
+  scoreX + scoreColumnWidth + ScorePanelNameGapX
+
+proc scorePanelPlayerAt(sim: SimServer, x, y: int): int =
+  ## Returns the player index for one score panel click.
+  let order = sim.scorePanelPlayerOrder()
+  if order.len == 0 or y < 0:
+    return -1
+  let
+    rowHeight = sim.scorePanelRowHeight()
+    row = y div rowHeight
+  if row < 0 or row >= order.len or row >= ScorePanelMaxRows:
+    return -1
+  let
+    playerIndex = order[row]
+    name = sim.players[playerIndex].scorePanelNameText()
+    nameX = sim.scorePanelNameX(order)
+    nameWidth = sim.textFont.textWidth(name)
+  if x < 0 or x >= nameX + nameWidth:
+    return -1
+  playerIndex
+
 proc scorePanelDigitSpriteId(ch: char): int =
   ## Returns the sprite id for one score panel digit.
   ScorePanelDigitSpriteBase + ord(ch) - ord('0')
@@ -534,9 +598,12 @@ proc scorePanelChipSpriteId(playerId: int): int =
   ## Returns the sprite id for one score panel color pip.
   ScorePanelChipSpriteBase + scorePanelPlayerKey(playerId)
 
-proc scorePanelNameSpriteId(playerId: int): int =
+proc scorePanelNameSpriteId(playerId: int, selected = false): int =
   ## Returns the sprite id for one score panel player name.
-  ScorePanelNameSpriteBase + scorePanelPlayerKey(playerId)
+  if selected:
+    ScorePanelSelectedNameSpriteBase + scorePanelPlayerKey(playerId)
+  else:
+    ScorePanelNameSpriteBase + scorePanelPlayerKey(playerId)
 
 proc scorePanelChipObjectId(rowIndex: int): int =
   ## Returns the object id for one score panel color pip.
@@ -747,6 +814,7 @@ proc rgbaColorForPlayer(playerId: int): RgbaColor =
   brightHsvColor((playerId - 1) * 137)
 
 proc pieceCenterPixel(player: Player): tuple[x: int, y: int] =
+  ## Returns the fine pixel center for one active piece.
   if not player.hasPiece:
     return (
       player.cameraX + PlayerViewportWidth div 2,
@@ -760,7 +828,7 @@ proc pieceCenterPixel(player: Player): tuple[x: int, y: int] =
   for cell in pieceCells(player.pieceKind, player.rotation):
     let
       x = (player.cellX + cell.x) * CellPixels
-      y = (player.cellY + cell.y) * CellPixels
+      y = player.piecePixelY(cell)
     minX = min(minX, x)
     maxX = max(maxX, x + CellPixels - 1)
     minY = min(minY, y)
@@ -788,13 +856,19 @@ proc pieceBottomY(player: Player): int =
   player.pieceBounds().maxY
 
 proc piecePixelBounds(player: Player): tuple[minX, maxX, minY, maxY: int] =
-  let bounds = pieceBounds(player)
-  (
-    bounds.minX * CellPixels,
-    bounds.maxX * CellPixels + CellPixels - 1,
-    bounds.minY * CellPixels,
-    bounds.maxY * CellPixels + CellPixels - 1
-  )
+  ## Returns the fine pixel bounds for one active piece.
+  result.minX = high(int)
+  result.maxX = low(int)
+  result.minY = high(int)
+  result.maxY = low(int)
+  for cell in pieceCells(player.pieceKind, player.rotation):
+    let
+      x = (player.cellX + cell.x) * CellPixels
+      y = player.piecePixelY(cell)
+    result.minX = min(result.minX, x)
+    result.maxX = max(result.maxX, x + CellPixels - 1)
+    result.minY = min(result.minY, y)
+    result.maxY = max(result.maxY, y + CellPixels - 1)
 
 proc clampCamera(player: var Player) =
   player.cameraX = worldClampPixel(
@@ -862,12 +936,56 @@ proc canPlaceStatic(
       return false
   true
 
+proc overlaps(aMin, aMax, bMin, bMax: int): bool =
+  ## Returns true when two inclusive integer ranges overlap.
+  aMin <= bMax and bMin <= aMax
+
+proc canPlaceStaticPixels(
+  sim: SimServer,
+  cellX, pixelY: int,
+  kind: PieceKind,
+  rotation: int
+): bool =
+  ## Returns true when a fine-positioned piece avoids static blocks.
+  for cell in pieceCells(kind, rotation):
+    let
+      x = cellX + cell.x
+      topY = pixelY + cell.y * CellPixels
+      bottomY = topY + CellPixels - 1
+      startY = topY div CellPixels
+      endY = bottomY div CellPixels
+    for y in startY .. endY:
+      if not inBoardBounds(x, y):
+        return false
+      let index = boardIndex(x, y)
+      if sim.terrain[index] or sim.settledColors[index] != 0:
+        return false
+  true
+
 proc playerHasCell(player: Player, x, y: int): bool =
   ## Returns true when one active piece occupies a board cell.
   if not player.alive or not player.hasPiece:
     return false
   for cell in pieceCells(player.pieceKind, player.rotation):
     if player.cellX + cell.x == x and player.cellY + cell.y == y:
+      return true
+
+proc playerOverlapsPixelCell(
+  player: Player,
+  x,
+  topY,
+  bottomY: int
+): bool =
+  ## Returns true when a player overlaps one fine-positioned cell.
+  if not player.alive or not player.hasPiece:
+    return false
+  for cell in pieceCells(player.pieceKind, player.rotation):
+    if player.cellX + cell.x != x:
+      continue
+    let
+      playerTopY = player.piecePixelY(cell)
+      playerBottomY = playerTopY + CellPixels - 1
+    if overlaps(topY, bottomY, playerTopY, playerBottomY):
       return true
 
 proc activeBlockerAt(
@@ -880,6 +998,21 @@ proc activeBlockerAt(
     if ignoredPlayers.hasInt(i):
       continue
     if sim.players[i].playerHasCell(x, y):
+      return i
+  -1
+
+proc activeBlockerAtPixels(
+  sim: SimServer,
+  ignoredPlayers: openArray[int],
+  x,
+  topY,
+  bottomY: int
+): int =
+  ## Returns an active player overlapping a fine-positioned cell, or -1.
+  for i in 0 ..< sim.players.len:
+    if ignoredPlayers.hasInt(i):
+      continue
+    if sim.players[i].playerOverlapsPixelCell(x, topY, bottomY):
       return i
   -1
 
@@ -901,6 +1034,30 @@ proc canPlaceIgnoring(
       return false
   true
 
+proc canPlacePixelsIgnoring(
+  sim: SimServer,
+  cellX, pixelY: int,
+  kind: PieceKind,
+  rotation: int,
+  ignoredPlayers: openArray[int]
+): bool =
+  ## Returns true when a fine-positioned piece avoids all blockers.
+  if not sim.canPlaceStaticPixels(cellX, pixelY, kind, rotation):
+    return false
+  for cell in pieceCells(kind, rotation):
+    let
+      x = cellX + cell.x
+      topY = pixelY + cell.y * CellPixels
+      bottomY = topY + CellPixels - 1
+    if sim.activeBlockerAtPixels(
+      ignoredPlayers,
+      x,
+      topY,
+      bottomY
+    ) >= 0:
+      return false
+  true
+
 proc canPlace(
   sim: SimServer,
   cellX, cellY: int,
@@ -911,19 +1068,24 @@ proc canPlace(
   let ignoredPlayers: array[0, int] = []
   sim.canPlaceIgnoring(cellX, cellY, kind, rotation, ignoredPlayers)
 
-proc blockingPlayersFor(
+proc blockingPlayersForPixels(
   sim: SimServer,
-  playerIndex, cellX, cellY, rotation: int,
+  playerIndex, cellX, pixelY, rotation: int,
   ignoredPlayers: openArray[int]
 ): seq[int] =
-  ## Returns active player indices blocking a candidate piece position.
+  ## Returns active player indices blocking a fine-positioned piece.
   let player = sim.players[playerIndex]
   for cell in pieceCells(player.pieceKind, rotation):
-    let blocker = sim.activeBlockerAt(
-      ignoredPlayers,
-      cellX + cell.x,
-      cellY + cell.y
-    )
+    let
+      x = cellX + cell.x
+      topY = pixelY + cell.y * CellPixels
+      bottomY = topY + CellPixels - 1
+      blocker = sim.activeBlockerAtPixels(
+        ignoredPlayers,
+        x,
+        topY,
+        bottomY
+      )
     if blocker >= 0:
       result.addUniqueInt(blocker)
 
@@ -945,19 +1107,19 @@ proc collectPushes(
   let
     player = sim.players[playerIndex]
     nextX = player.cellX + dx
-    nextY = player.cellY + dy
-  if not sim.canPlaceStatic(
+    nextPixelY = player.pixelY + dy * CellPixels
+  if not sim.canPlaceStaticPixels(
     nextX,
-    nextY,
+    nextPixelY,
     player.pieceKind,
     player.rotation
   ):
     return false
 
-  let blockers = sim.blockingPlayersFor(
+  let blockers = sim.blockingPlayersForPixels(
     playerIndex,
     nextX,
-    nextY,
+    nextPixelY,
     player.rotation,
     movingPlayers
   )
@@ -979,7 +1141,10 @@ proc moveCollectedPlayers(
     if playerIndex < 0 or playerIndex >= sim.players.len:
       continue
     sim.players[playerIndex].cellX += dx
-    sim.players[playerIndex].cellY += dy
+    if dy != 0:
+      sim.players[playerIndex].setPixelY(
+        sim.players[playerIndex].pixelY + dy * CellPixels
+      )
 
 proc refreshLockDepth(sim: var SimServer, playerIndex: int) =
   ## Resets lock delay only after a piece reaches a new lower row.
@@ -1002,7 +1167,7 @@ proc drawPiece(
   for cell in pieceCells(player.pieceKind, player.rotation):
     let
       worldX = (player.cellX + cell.x) * CellPixels
-      worldY = (player.cellY + cell.y) * CellPixels
+      worldY = player.piecePixelY(cell)
       screenX = worldX - cameraX
       screenY = worldY - cameraY
     fb.putRect(screenX, screenY, CellPixels, CellPixels, color)
@@ -1241,10 +1406,8 @@ proc respawnPlayer(sim: var SimServer, playerIndex, centerX, topY: int, recenter
   sim.players[playerIndex].nextKind = sim.randomPiece()
   sim.players[playerIndex].rotation = 0
   sim.players[playerIndex].cellX = spawn.x
-  sim.players[playerIndex].cellY = spawn.y
+  sim.players[playerIndex].setPixelY(spawn.y * CellPixels)
   sim.players[playerIndex].moveTicksX = 0
-  sim.players[playerIndex].moveTicksY = 0
-  sim.players[playerIndex].fallTicks = 0
   sim.players[playerIndex].lockTicks = 0
   sim.players[playerIndex].deepestCellY =
     sim.players[playerIndex].pieceBottomY()
@@ -1285,6 +1448,36 @@ proc tryMove(sim: var SimServer, playerIndex, dx, dy: int): bool =
   sim.moveCollectedPlayers(movingPlayers, dx, dy)
   true
 
+proc tryMovePixelsY(
+  sim: var SimServer,
+  playerIndex,
+  dyPixels: int
+): bool =
+  ## Moves one active piece down by fine pixels.
+  if playerIndex < 0 or
+      playerIndex >= sim.players.len or
+      not sim.players[playerIndex].alive or
+      not sim.players[playerIndex].hasPiece:
+    return false
+  if dyPixels <= 0:
+    return true
+
+  let ignoredPlayers = [playerIndex]
+  for i in 0 ..< dyPixels:
+    let
+      player = sim.players[playerIndex]
+      targetPixelY = player.pixelY + 1
+    if not sim.canPlacePixelsIgnoring(
+      player.cellX,
+      targetPixelY,
+      player.pieceKind,
+      player.rotation,
+      ignoredPlayers
+    ):
+      return i > 0
+    sim.players[playerIndex].setPixelY(targetPixelY)
+  true
+
 proc tryRotate(sim: var SimServer, playerIndex: int): bool =
   ## Rotates one active piece when the target cells are unoccupied.
   if playerIndex < 0 or
@@ -1305,17 +1498,17 @@ proc tryRotate(sim: var SimServer, playerIndex: int): bool =
   ]:
     let
       nextX = sim.players[playerIndex].cellX + kick.x
-      nextY = sim.players[playerIndex].cellY + kick.y
-    if sim.canPlaceIgnoring(
+      nextPixelY = sim.players[playerIndex].pixelY + kick.y * CellPixels
+    if sim.canPlacePixelsIgnoring(
       nextX,
-      nextY,
+      nextPixelY,
       sim.players[playerIndex].pieceKind,
       nextRotation,
       ignoredPlayers
     ):
       sim.players[playerIndex].rotation = nextRotation
       sim.players[playerIndex].cellX = nextX
-      sim.players[playerIndex].cellY = nextY
+      sim.players[playerIndex].setPixelY(nextPixelY)
       return true
   false
 
@@ -1437,6 +1630,157 @@ proc pruneSettledConnections(sim: var SimServer) =
           mask = mask and not direction
       sim.settledConnections[index] = mask
 
+proc buildSettledComponents(
+  sim: SimServer,
+  componentIds: var seq[int]
+): seq[seq[int]] =
+  ## Builds settled block components using stored connection masks.
+  componentIds = newSeq[int](BoardWidthCells * BoardHeightCells)
+  for i in 0 ..< componentIds.len:
+    componentIds[i] = -1
+
+  var stack: seq[int] = @[]
+  for index in 0 ..< componentIds.len:
+    if sim.settledColors[index] == 0 or componentIds[index] >= 0:
+      continue
+
+    let componentId = result.len
+    result.add(@[])
+    componentIds[index] = componentId
+    stack.setLen(0)
+    stack.add(index)
+
+    while stack.len > 0:
+      let current = stack[^1]
+      stack.setLen(stack.len - 1)
+      result[componentId].add(current)
+      let
+        x = current mod BoardWidthCells
+        y = current div BoardWidthCells
+        mask = sim.settledConnections[current]
+      for direction in [ConnectLeft, ConnectRight, ConnectUp, ConnectDown]:
+        if (mask and direction) == 0:
+          continue
+        let neighbor = neighborFor(x, y, direction)
+        if not inBoardBounds(neighbor.x, neighbor.y):
+          continue
+        let neighborIndex = boardIndex(neighbor.x, neighbor.y)
+        if sim.settledColors[neighborIndex] == 0:
+          continue
+        if (sim.settledConnections[neighborIndex] and
+            direction.oppositeConnection()) == 0:
+          continue
+        if componentIds[neighborIndex] >= 0:
+          continue
+        componentIds[neighborIndex] = componentId
+        stack.add(neighborIndex)
+
+proc componentHasSupport(
+  sim: SimServer,
+  component: openArray[int],
+  componentIds: openArray[int],
+  componentId: int
+): bool =
+  ## Returns true when a component is supported by terrain or other blocks.
+  for index in component:
+    let
+      x = index mod BoardWidthCells
+      y = index div BoardWidthCells
+      belowY = y + 1
+    if belowY >= BoardHeightCells:
+      return true
+    let belowIndex = boardIndex(x, belowY)
+    if sim.terrain[belowIndex]:
+      return true
+    if sim.settledColors[belowIndex] != 0 and
+        componentIds[belowIndex] != componentId:
+      return true
+
+proc unsupportedSettledComponents(sim: SimServer): seq[seq[int]] =
+  ## Returns settled components that can fall one row.
+  var componentIds: seq[int]
+  let components = sim.buildSettledComponents(componentIds)
+  for componentId, component in components:
+    if not sim.componentHasSupport(
+      component,
+      componentIds,
+      componentId
+    ):
+      result.add(component)
+
+proc canDropComponentsOneRow(
+  sim: SimServer,
+  components: openArray[seq[int]],
+  moving: openArray[bool]
+): bool =
+  ## Returns true when all falling components can move down one row.
+  for component in components:
+    for sourceIndex in component:
+      let destinationIndex = sourceIndex + BoardWidthCells
+      if destinationIndex >= moving.len:
+        return false
+      if sim.terrain[destinationIndex]:
+        return false
+      if sim.settledColors[destinationIndex] != 0 and
+          not moving[destinationIndex]:
+        return false
+  true
+
+proc dropSettledComponentsOneRow(
+  sim: var SimServer,
+  components: openArray[seq[int]]
+): bool =
+  ## Drops settled components one row while preserving block data.
+  var
+    moving = newSeq[bool](BoardWidthCells * BoardHeightCells)
+    sources: seq[int] = @[]
+    destinations: seq[int] = @[]
+    colors: seq[uint8] = @[]
+    owners: seq[int] = @[]
+    connections: seq[uint8] = @[]
+
+  for component in components:
+    for sourceIndex in component:
+      moving[sourceIndex] = true
+      sources.add(sourceIndex)
+      destinations.add(sourceIndex + BoardWidthCells)
+      colors.add(sim.settledColors[sourceIndex])
+      owners.add(sim.settledOwners[sourceIndex])
+      connections.add(sim.settledConnections[sourceIndex])
+
+  if sources.len == 0 or not sim.canDropComponentsOneRow(
+    components,
+    moving
+  ):
+    return false
+
+  for sourceIndex in sources:
+    sim.settledColors[sourceIndex] = 0
+    sim.settledOwners[sourceIndex] = 0
+    sim.settledConnections[sourceIndex] = 0
+
+  for i in 0 ..< sources.len:
+    let destinationIndex = destinations[i]
+    sim.settledColors[destinationIndex] = colors[i]
+    sim.settledOwners[destinationIndex] = owners[i]
+    sim.settledConnections[destinationIndex] = connections[i]
+  true
+
+proc dropUnsupportedSettledBlocks(sim: var SimServer): bool =
+  ## Drops unsupported settled components until the board is stable.
+  for _ in 0 ..< MaxAvalancheSteps:
+    sim.pruneSettledConnections()
+    let components = sim.unsupportedSettledComponents()
+    if components.len == 0:
+      break
+    if not sim.dropSettledComponentsOneRow(components):
+      break
+    result = true
+
+  sim.pruneSettledConnections()
+  if result:
+    sim.settledCellsDirty = true
+
 proc hasStaticSupportBelow(sim: SimServer, playerIndex: int): bool =
   ## Returns true when terrain or settled blocks support a player piece.
   if playerIndex < 0 or
@@ -1506,23 +1850,6 @@ proc clearSegments(sim: var SimServer, segments: openArray[ClearSegment]) =
       sim.settledConnections[index] = 0
   sim.settledCellsDirty = true
 
-proc dropAboveSegmentOneRow(sim: var SimServer, segment: ClearSegment) =
-  for x in segment.startX .. segment.endX:
-    for y in countdown(segment.y, 1):
-      let
-        dstIndex = boardIndex(x, y)
-        srcIndex = boardIndex(x, y - 1)
-      sim.settledColors[dstIndex] = sim.settledColors[srcIndex]
-      sim.settledOwners[dstIndex] = sim.settledOwners[srcIndex]
-      sim.settledConnections[dstIndex] = sim.settledConnections[srcIndex]
-
-    let topIndex = boardIndex(x, 0)
-    sim.settledColors[topIndex] = 0
-    sim.settledOwners[topIndex] = 0
-    sim.settledConnections[topIndex] = 0
-  sim.pruneSettledConnections()
-  sim.settledCellsDirty = true
-
 proc rebuildSettledCellIndices(sim: var SimServer) =
   ## Rebuilds the compact list of occupied settled cells.
   sim.settledCellIndices.setLen(0)
@@ -1589,7 +1916,7 @@ proc finalizeActiveClear(sim: var SimServer) =
 
   sim.awardPendingClear(sim.activeClear)
   sim.clearSegments([sim.activeClear.segment])
-  sim.dropAboveSegmentOneRow(sim.activeClear.segment)
+  discard sim.dropUnsupportedSettledBlocks()
   sim.clearDisplayPlayerId = sim.activeClear.triggerPlayerId
   sim.activeClearValid = false
   sim.clearFlashTimer = 0
@@ -1627,12 +1954,22 @@ proc lockPiece(sim: var SimServer, playerIndex: int) =
       not sim.players[playerIndex].hasPiece:
     return
 
-  let ignoredPlayers = [playerIndex]
+  let
+    ignoredPlayers = [playerIndex]
+    player = sim.players[playerIndex]
   if not sim.canPlaceIgnoring(
-    sim.players[playerIndex].cellX,
-    sim.players[playerIndex].cellY,
-    sim.players[playerIndex].pieceKind,
-    sim.players[playerIndex].rotation,
+    player.cellX,
+    player.cellY,
+    player.pieceKind,
+    player.rotation,
+    ignoredPlayers
+  ):
+    return
+  if not sim.canPlacePixelsIgnoring(
+    player.cellX,
+    player.pixelY,
+    player.pieceKind,
+    player.rotation,
     ignoredPlayers
   ):
     return
@@ -1678,13 +2015,9 @@ proc applyInput(sim: var SimServer, playerIndex: int, input: InputState) =
 
   if sim.players[playerIndex].moveTicksX > 0:
     dec sim.players[playerIndex].moveTicksX
-  if sim.players[playerIndex].moveTicksY > 0:
-    dec sim.players[playerIndex].moveTicksY
-
   if input.attack:
     discard sim.tryRotate(playerIndex)
-    discard sim.tryMove(playerIndex, 0, 1)
-    sim.players[playerIndex].fallTicks = 0
+    discard sim.tryMovePixelsY(playerIndex, CellPixels)
 
   let horizontal =
     (if input.left and not input.right: -1
@@ -1694,16 +2027,12 @@ proc applyInput(sim: var SimServer, playerIndex: int, input: InputState) =
     discard sim.tryMove(playerIndex, horizontal, 0)
     sim.players[playerIndex].moveTicksX = MoveRepeatInterval
 
-  let vertical = if input.down: 1 else: 0
-  if vertical != 0 and sim.players[playerIndex].moveTicksY == 0:
-    discard sim.tryMove(playerIndex, 0, vertical)
-    sim.players[playerIndex].moveTicksY = MoveRepeatInterval
-
-  inc sim.players[playerIndex].fallTicks
-  let fallInterval = if input.down: SoftFallInterval else: BaseFallInterval
-  if sim.players[playerIndex].fallTicks >= fallInterval:
-    sim.players[playerIndex].fallTicks = 0
-    discard sim.tryMove(playerIndex, 0, 1)
+  let gravityPixels =
+    if input.down:
+      SoftGravityPixelsPerTick
+    else:
+      GravityPixelsPerTick
+  discard sim.tryMovePixelsY(playerIndex, gravityPixels)
 
   sim.refreshLockDepth(playerIndex)
   if sim.hasStaticSupportBelow(playerIndex):
@@ -1892,25 +2221,33 @@ proc addScorePanelPlayerSprites(
   sim: SimServer,
   state: GlobalViewerState,
   player: Player,
-  name: string
+  name: string,
+  selected: bool
 ) =
   ## Appends stable score panel player sprites once.
-  if player.id in state.sentScorePanelPlayers:
-    return
-  state.sentScorePanelPlayers.add(player.id)
-  let
-    pip = buildScorePanelChipSprite(player.rgbaColor)
-    label = sim.plainTextSprite(name, player.rgbaColor)
-  packet.addRgbaSprite(
-    scorePanelChipSpriteId(player.id),
-    pip,
-    "score pip " & $player.id
-  )
-  packet.addRgbaSprite(
-    scorePanelNameSpriteId(player.id),
-    label,
-    "score name " & name
-  )
+  if player.id notin state.sentScorePanelPlayers:
+    state.sentScorePanelPlayers.add(player.id)
+    let
+      pip = buildScorePanelChipSprite(player.rgbaColor)
+      label = sim.plainTextSprite(name, player.rgbaColor)
+    packet.addRgbaSprite(
+      scorePanelChipSpriteId(player.id),
+      pip,
+      "score pip " & $player.id
+    )
+    packet.addRgbaSprite(
+      scorePanelNameSpriteId(player.id),
+      label,
+      "score name " & name
+    )
+  if selected and player.id notin state.sentSelectedScorePanelPlayers:
+    state.sentSelectedScorePanelPlayers.add(player.id)
+    let label = sim.plainTextSprite(name, ScorePanelSelectedColor)
+    packet.addRgbaSprite(
+      scorePanelNameSpriteId(player.id, selected = true),
+      label,
+      "selected score name " & name
+    )
 
 proc terrainRgbaColor(): RgbaColor =
   ## Returns the neutral floor color.
@@ -2120,19 +2457,19 @@ proc addNameLabel(
 proc addGlobalScorePanel(
   packet: var seq[uint8],
   sim: SimServer,
-  state: var GlobalViewerState
+  state: var GlobalViewerState,
+  selectedPlayerIndex = -1
 ) =
   ## Appends the global score panel objects.
   if sim.players.len == 0:
     return
   let order = sim.scorePanelPlayerOrder()
   let
-    lineHeight = sim.textFont.lineHeight()
-    rowHeight = max(lineHeight, ScorePanelPipSize)
+    rowHeight = sim.scorePanelRowHeight()
     scoreColumnWidth = sim.scorePanelScoreWidth(order)
     nameColumnWidth = sim.scorePanelNameWidth(order)
     scoreX = ScorePanelPipSize + ScorePanelPipGapX
-    nameX = scoreX + scoreColumnWidth + ScorePanelNameGapX
+    nameX = sim.scorePanelNameX(order)
     panelWidth = max(1, nameX + nameColumnWidth)
     panelHeight = max(1, min(order.len, ScorePanelMaxRows) * rowHeight)
   packet.addLayer(
@@ -2157,11 +2494,13 @@ proc addGlobalScorePanel(
       scoreWidth = sim.textFont.textWidth(scoreText)
       alignedScoreX = scoreX + max(0, scoreColumnWidth - scoreWidth)
       name = player.scorePanelNameText()
+      selected = playerIndex == selectedPlayerIndex
     packet.addScorePanelPlayerSprites(
       sim,
       state,
       player,
-      name
+      name,
+      selected
     )
     packet.addObject(
       scorePanelChipObjectId(i),
@@ -2177,7 +2516,7 @@ proc addGlobalScorePanel(
       rowY,
       high(int16),
       GlobalScorePanelLayerId,
-      scorePanelNameSpriteId(player.id)
+      scorePanelNameSpriteId(player.id, selected)
     )
     var digitX = alignedScoreX
     for j, ch in scoreText:
@@ -2297,7 +2636,7 @@ proc overlayRgbaPiece(
   for cell in pieceCells(player.pieceKind, player.rotation):
     let
       screenX = (player.cellX + cell.x) * CellPixels - cameraX
-      screenY = (player.cellY + cell.y) * CellPixels - cameraY
+      screenY = player.piecePixelY(cell) - cameraY
     pixels.putRgbaRectMasked(
       frame,
       screenX,
@@ -2351,6 +2690,33 @@ proc renderSpriteFrame(sim: var SimServer, playerIndex: int): seq[uint8] =
     ScreenWidth - 8,
     0
   )
+
+proc selectedGlobalPlayerIndex(
+  state: GlobalViewerState,
+  sim: SimServer
+): int =
+  ## Returns the selected player index clamped to live players.
+  if state == nil or state.selectedPlayerIndex < 0:
+    return -1
+  if state.selectedPlayerIndex >= sim.players.len:
+    return -1
+  state.selectedPlayerIndex
+
+proc applyPendingScorePanelClick(state: GlobalViewerState, sim: SimServer) =
+  ## Applies one pending score panel click to the selected player.
+  if state == nil or not state.pendingScorePanelClick:
+    return
+  let clickedPlayer = sim.scorePanelPlayerAt(
+    state.pendingScorePanelClickX,
+    state.pendingScorePanelClickY
+  )
+  if clickedPlayer >= 0:
+    state.selectedPlayerIndex =
+      if state.selectedPlayerIndex == clickedPlayer:
+        -1
+      else:
+        clickedPlayer
+  state.pendingScorePanelClick = false
 
 proc buildGlobalFramePacket(
   sim: var SimServer,
@@ -2452,7 +2818,7 @@ proc buildGlobalFramePacket(
       result.addObjectIfRoom(
         objectId,
         (otherPlayer.cellX + cell.x) * CellPixels - cameraX,
-        (otherPlayer.cellY + cell.y) * CellPixels - cameraY,
+        otherPlayer.piecePixelY(cell) - cameraY,
         3,
         ownerBlockSpriteId(
           otherPlayer.id,
@@ -2497,7 +2863,8 @@ proc buildGlobalFramePacket(
 proc buildGlobalMapPacket(
   sim: var SimServer,
   state: GlobalViewerState,
-  nextState: var GlobalViewerState
+  nextState: var GlobalViewerState,
+  selectedPlayerIndex = -1
 ): seq[uint8] =
   ## Builds one global protocol packet for the full board overview.
   nextState = viewerState(state)
@@ -2511,7 +2878,7 @@ proc buildGlobalMapPacket(
     result.addClearBlockSprites(nextState, sim.blockParts)
 
   var objectId = GlobalBlockObjectBase
-  result.addGlobalScorePanel(sim, nextState)
+  result.addGlobalScorePanel(sim, nextState, selectedPlayerIndex)
   if sim.settledCellsDirty:
     sim.rebuildSettledCellIndices()
   for x in 0 ..< BoardWidthCells:
@@ -2564,7 +2931,7 @@ proc buildGlobalMapPacket(
       result.addObjectIfRoom(
         objectId,
         (player.cellX + cell.x) * CellPixels,
-        (player.cellY + cell.y) * CellPixels,
+        player.piecePixelY(cell),
         3,
         ownerBlockSpriteId(player.id, player.playerConnectionMask(cell))
       )
@@ -2584,6 +2951,38 @@ proc buildGlobalMapPacket(
       5
     )
     addSpeechBubble(result, sim, player, objectId, 0, 0, 5)
+
+proc buildGlobalViewerPacket(
+  sim: var SimServer,
+  state: GlobalViewerState,
+  nextState: var GlobalViewerState
+): seq[uint8] =
+  ## Builds the global map or the selected player's point of view.
+  nextState = viewerState(state)
+  let previousViewPlayerIndex = nextState.viewPlayerIndex
+  nextState.applyPendingScorePanelClick(sim)
+  let selectedPlayerIndex = nextState.selectedGlobalPlayerIndex(sim)
+  nextState.selectedPlayerIndex = selectedPlayerIndex
+  if previousViewPlayerIndex != selectedPlayerIndex:
+    nextState.resetProtocolState()
+  nextState.viewPlayerIndex = selectedPlayerIndex
+  if selectedPlayerIndex >= 0:
+    var frameState: GlobalViewerState
+    result = sim.buildGlobalFramePacket(
+      selectedPlayerIndex,
+      nextState,
+      frameState
+    )
+    nextState = frameState
+    result.addGlobalScorePanel(sim, nextState, selectedPlayerIndex)
+  else:
+    var mapState: GlobalViewerState
+    result = sim.buildGlobalMapPacket(
+      nextState,
+      mapState,
+      selectedPlayerIndex
+    )
+    nextState = mapState
 
 proc buildRewardPacket(sim: SimServer): string =
   for player in sim.players:
@@ -2770,7 +3169,7 @@ proc sendGlobalMapPackets(
   globalViewers: openArray[WebSocket],
   globalStates: openArray[GlobalViewerState]
 ) =
-  ## Sends one compact full-map frame to all global viewers.
+  ## Sends one global map or selected player POV frame to all viewers.
   if globalViewers.len == 0:
     return
   for i in 0 ..< globalViewers.len:
@@ -2781,7 +3180,7 @@ proc sendGlobalMapPackets(
         newGlobalViewerState()
     var nextState: GlobalViewerState
     let packetBlob = blobFromBytes(
-      buildGlobalMapPacket(
+      buildGlobalViewerPacket(
         sim,
         state,
         nextState
@@ -2843,6 +3242,19 @@ proc isSpritePlayerInputPacket(blob: string): bool =
   ## Returns true when a global protocol player input packet was received.
   blob.len == InputPacketBytes and blob[0].uint8 == 0x84'u8
 
+proc readClientU16(data: string, offset: int): int =
+  ## Reads one little endian unsigned 16 bit client value.
+  int(uint16(data[offset].uint8) or
+    (uint16(data[offset + 1].uint8) shl 8))
+
+proc readClientI16(data: string, offset: int): int =
+  ## Reads one little endian signed 16 bit client value.
+  let value = data.readClientU16(offset)
+  if value >= 0x8000:
+    value - 0x10000
+  else:
+    value
+
 proc readSpriteInputText(message: string): string =
   ## Reads printable text from sprite player input messages.
   var offset = 0
@@ -2894,6 +3306,57 @@ proc playerChatFromMessage(message: Message): string =
     message.data.readSpriteInputText()
   of Ping, Pong:
     ""
+
+proc globalScorePanelClick(
+  message: Message
+): tuple[found: bool, x: int, y: int] =
+  ## Returns one score panel mouse-down click from a global viewer message.
+  if message.kind != BinaryMessage:
+    return
+  var
+    offset = 0
+    x = 0
+    y = 0
+    layer = -1
+  let blob = message.data
+  while offset < blob.len:
+    let messageType = blob[offset].uint8
+    inc offset
+    case messageType
+    of 0x82:
+      if offset + 4 > blob.len:
+        return
+      x = blob.readClientI16(offset)
+      y = blob.readClientI16(offset + 2)
+      offset += 4
+      if offset < blob.len and blob[offset].uint8 notin
+          {0x81'u8, 0x82'u8, 0x83'u8, 0x84'u8}:
+        layer = int(blob[offset].uint8)
+        inc offset
+      else:
+        layer = GlobalLayerId
+    of 0x83:
+      if offset + 2 > blob.len:
+        return
+      let
+        button = blob[offset].uint8
+        down = blob[offset + 1].uint8 != 0
+      offset += 2
+      if layer == GlobalScorePanelLayerId and button == 1'u8 and down:
+        return (found: true, x: x, y: y)
+    of 0x81:
+      if offset + 2 > blob.len:
+        return
+      let length = blob.readClientU16(offset)
+      offset += 2 + length
+      if offset > blob.len:
+        return
+    of 0x84:
+      if offset + 1 > blob.len:
+        return
+      inc offset
+    else:
+      return
 
 proc serveHealthz(request: Request): bool =
   ## Serves the container health check endpoint.
@@ -3020,6 +3483,17 @@ proc websocketHandler(
           of SocketUnknown:
             discard
       return
+    let scorePanelClick = message.globalScorePanelClick()
+    if scorePanelClick.found:
+      {.gcsafe.}:
+        withLock appState.lock:
+          if websocket.socketKind() == SocketGlobal and
+              websocket in appState.globalViewers:
+            let state = appState.globalViewers[websocket]
+            state.pendingScorePanelClick = true
+            state.pendingScorePanelClickX = scorePanelClick.x
+            state.pendingScorePanelClickY = scorePanelClick.y
+            appState.globalSendReady[websocket] = true
     let chatText = message.playerChatFromMessage().cleanChatMessage()
     if message.kind == BinaryMessage and
         isSpritePlayerInputPacket(message.data):
