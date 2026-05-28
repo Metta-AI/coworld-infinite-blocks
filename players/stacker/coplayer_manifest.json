@@ -1,7 +1,7 @@
 {
   "author": "treeform@softmax.com",
   "name": "stacker",
-  "image_uri": "ghcr.io/treeform/bitworld-stacker:latest",
+  "image_uri": "public.ecr.aws/s3j4p9s7/treeform/players/stacker:latest",
   "games": [
     "infinite_blocks"
   ],
