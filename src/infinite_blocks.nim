@@ -3300,7 +3300,7 @@ proc update(config: var RunConfig, jsonText: string) =
   node.readConfigInt("max-games", config.maxGames)
 
 when isMainModule:
-  let runtimeConfig = readRuntimeConfig(DefaultHost, DefaultPort)
+  let runtimeConfig = readRuntimeConfig()
   var
     config = RunConfig(
       address: runtimeConfig.host,
