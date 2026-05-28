@@ -25,7 +25,7 @@ https://github.com/treeform/nimby/releases/download/0.1.26/nimby-Linux-ARM64; \
 
 ENV PATH="/root/.nimby/nim/bin:$PATH"
 
-WORKDIR /workspace/cogame-infinite-blocks
+WORKDIR /workspace/coworld-infinite-blocks
 COPY nimby.lock .
 RUN nimby --global sync nimby.lock
 
@@ -33,7 +33,7 @@ COPY . .
 RUN nim c \
   -d:release \
   --path:src \
-  --nimcache:/tmp/cogame-nimcache \
+  --nimcache:/tmp/coworld-nimcache \
   --out:/bin/infinite_blocks \
   src/infinite_blocks.nim
 
@@ -44,7 +44,7 @@ RUN apt-get update && \
   apt-get install -y --no-install-recommends ca-certificates curl && \
   rm -rf /var/lib/apt/lists/*
 
-WORKDIR /workspace/cogame-infinite-blocks
+WORKDIR /workspace/coworld-infinite-blocks
 COPY --from=build /bin/infinite_blocks /bin/infinite_blocks
 COPY data ./data
 COPY coworld_manifest.json .
