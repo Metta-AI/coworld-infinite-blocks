@@ -17,6 +17,7 @@ const
   BaseTerrainY = BoardHeightCells * 31 div 50
   LineClearLength = 8
   LaneStartX = BoardWidthCells div 2 - LineClearLength div 2
+  PlayfieldLayerId = 0
   MaxDrainMessages = 64
   DebugInterval = 60
   BrightMinChannel = 30
@@ -578,6 +579,8 @@ proc applySpritePacket(
         spriteId: packet.readU16(offset + 9)
       )
       offset += 11
+      if item.layer != PlayfieldLayerId:
+        continue
       if playerFrame:
         bot.frameObjects[item.id] = item
       else:
@@ -598,6 +601,10 @@ proc applySpritePacket(
     of 0x05:
       if offset + 5 > packet.len:
         return false
+      let layer = packet[offset].int
+      if layer != PlayfieldLayerId:
+        offset += 5
+        continue
       if playerFrame:
         bot.frameWidth = packet.readU16(offset + 1)
         bot.frameHeight = packet.readU16(offset + 3)

@@ -20,16 +20,15 @@ const
   GravityPixelsPerTick = 1
   SoftGravityPixelsPerTick = 3
   MoveRepeatInterval = 5
-  LockDelayTicks = 20
+  LockDelayTicks = 0
   LineClearLength = 8
   TerrainColor = 1'u8
   BackgroundColor = 0'u8
-  ClearFlashTicks = 20
-  ClearPauseTicks = 12
+  TargetFps = 30
+  ClearFlashTicks = TargetFps div 3
   MaxAvalancheSteps = BoardHeightCells * 2
-  TargetFps = 60
   DefaultMaxTicks = TargetFps * 60 * 5
-  GlobalSendInterval = 6
+  GlobalSendInterval = 3
   PlayerWebSocketPath = "/player"
   HealthPath = "/healthz"
   GlobalWebSocketPath = "/global"
@@ -86,7 +85,7 @@ const
   NameGapY = 2
   ChatLifetimeTicks = TargetFps * 5
   GlobalNameSpriteBase = 51000
-  BackgroundRgba = (r: 51'u8, g: 49'u8, b: 54'u8, a: 255'u8)
+  BackgroundRgba = (r: 0'u8, g: 0'u8, b: 0'u8, a: 255'u8)
   ScorePanelPipSize = 3
   ScorePanelPipGapX = 2
   ScorePanelNameGapX = 3
@@ -157,6 +156,7 @@ type
     pendingSpawnCenterX: int
     pendingSpawnTopY: int
     pendingSpawn: bool
+    pendingSpawnWaitClear: bool
     message: string
     messageTicks: int
 
@@ -180,8 +180,6 @@ type
     activeClear: PendingClear
     activeClearValid: bool
     clearFlashTimer: int
-    clearPauseTimer: int
-    clearCascadePlayerId: int
     clearDisplayPlayerId: int
 
   GlobalViewerState = ref object
@@ -291,9 +289,9 @@ proc setPixelY(player: var Player, pixelY: int) =
   player.pixelY = pixelY
   player.cellY = pixelY div CellPixels
 
-proc piecePixelY(player: Player, cell: BlockOffset): int =
-  ## Returns the fine pixel Y position for one piece cell.
-  player.pixelY + cell.y * CellPixels
+proc pieceCellPixelY(player: Player, cell: BlockOffset): int =
+  ## Returns the snapped visual Y position for one piece cell.
+  (player.cellY + cell.y) * CellPixels
 
 proc worldClampPixel(x, maxValue: int): int =
   ## Clamps one world pixel coordinate against a non-negative limit.
@@ -828,7 +826,7 @@ proc pieceCenterPixel(player: Player): tuple[x: int, y: int] =
   for cell in pieceCells(player.pieceKind, player.rotation):
     let
       x = (player.cellX + cell.x) * CellPixels
-      y = player.piecePixelY(cell)
+      y = player.pieceCellPixelY(cell)
     minX = min(minX, x)
     maxX = max(maxX, x + CellPixels - 1)
     minY = min(minY, y)
@@ -856,7 +854,7 @@ proc pieceBottomY(player: Player): int =
   player.pieceBounds().maxY
 
 proc piecePixelBounds(player: Player): tuple[minX, maxX, minY, maxY: int] =
-  ## Returns the fine pixel bounds for one active piece.
+  ## Returns the snapped pixel bounds for one active piece.
   result.minX = high(int)
   result.maxX = low(int)
   result.minY = high(int)
@@ -864,7 +862,7 @@ proc piecePixelBounds(player: Player): tuple[minX, maxX, minY, maxY: int] =
   for cell in pieceCells(player.pieceKind, player.rotation):
     let
       x = (player.cellX + cell.x) * CellPixels
-      y = player.piecePixelY(cell)
+      y = player.pieceCellPixelY(cell)
     result.minX = min(result.minX, x)
     result.maxX = max(result.maxX, x + CellPixels - 1)
     result.minY = min(result.minY, y)
@@ -936,31 +934,14 @@ proc canPlaceStatic(
       return false
   true
 
-proc overlaps(aMin, aMax, bMin, bMax: int): bool =
-  ## Returns true when two inclusive integer ranges overlap.
-  aMin <= bMax and bMin <= aMax
-
 proc canPlaceStaticPixels(
   sim: SimServer,
   cellX, pixelY: int,
   kind: PieceKind,
   rotation: int
 ): bool =
-  ## Returns true when a fine-positioned piece avoids static blocks.
-  for cell in pieceCells(kind, rotation):
-    let
-      x = cellX + cell.x
-      topY = pixelY + cell.y * CellPixels
-      bottomY = topY + CellPixels - 1
-      startY = topY div CellPixels
-      endY = bottomY div CellPixels
-    for y in startY .. endY:
-      if not inBoardBounds(x, y):
-        return false
-      let index = boardIndex(x, y)
-      if sim.terrain[index] or sim.settledColors[index] != 0:
-        return false
-  true
+  ## Returns true when a fine-positioned piece's logical cells are free.
+  sim.canPlaceStatic(cellX, pixelY div CellPixels, kind, rotation)
 
 proc playerHasCell(player: Player, x, y: int): bool =
   ## Returns true when one active piece occupies a board cell.
@@ -968,24 +949,6 @@ proc playerHasCell(player: Player, x, y: int): bool =
     return false
   for cell in pieceCells(player.pieceKind, player.rotation):
     if player.cellX + cell.x == x and player.cellY + cell.y == y:
-      return true
-
-proc playerOverlapsPixelCell(
-  player: Player,
-  x,
-  topY,
-  bottomY: int
-): bool =
-  ## Returns true when a player overlaps one fine-positioned cell.
-  if not player.alive or not player.hasPiece:
-    return false
-  for cell in pieceCells(player.pieceKind, player.rotation):
-    if player.cellX + cell.x != x:
-      continue
-    let
-      playerTopY = player.piecePixelY(cell)
-      playerBottomY = playerTopY + CellPixels - 1
-    if overlaps(topY, bottomY, playerTopY, playerBottomY):
       return true
 
 proc activeBlockerAt(
@@ -998,21 +961,6 @@ proc activeBlockerAt(
     if ignoredPlayers.hasInt(i):
       continue
     if sim.players[i].playerHasCell(x, y):
-      return i
-  -1
-
-proc activeBlockerAtPixels(
-  sim: SimServer,
-  ignoredPlayers: openArray[int],
-  x,
-  topY,
-  bottomY: int
-): int =
-  ## Returns an active player overlapping a fine-positioned cell, or -1.
-  for i in 0 ..< sim.players.len:
-    if ignoredPlayers.hasInt(i):
-      continue
-    if sim.players[i].playerOverlapsPixelCell(x, topY, bottomY):
       return i
   -1
 
@@ -1041,22 +989,14 @@ proc canPlacePixelsIgnoring(
   rotation: int,
   ignoredPlayers: openArray[int]
 ): bool =
-  ## Returns true when a fine-positioned piece avoids all blockers.
-  if not sim.canPlaceStaticPixels(cellX, pixelY, kind, rotation):
-    return false
-  for cell in pieceCells(kind, rotation):
-    let
-      x = cellX + cell.x
-      topY = pixelY + cell.y * CellPixels
-      bottomY = topY + CellPixels - 1
-    if sim.activeBlockerAtPixels(
-      ignoredPlayers,
-      x,
-      topY,
-      bottomY
-    ) >= 0:
-      return false
-  true
+  ## Returns true when a fine-positioned piece's logical cells are free.
+  sim.canPlaceIgnoring(
+    cellX,
+    pixelY div CellPixels,
+    kind,
+    rotation,
+    ignoredPlayers
+  )
 
 proc canPlace(
   sim: SimServer,
@@ -1066,7 +1006,13 @@ proc canPlace(
 ): bool =
   ## Returns true when a piece can occupy a board position.
   let ignoredPlayers: array[0, int] = []
-  sim.canPlaceIgnoring(cellX, cellY, kind, rotation, ignoredPlayers)
+  sim.canPlacePixelsIgnoring(
+    cellX,
+    cellY * CellPixels,
+    kind,
+    rotation,
+    ignoredPlayers
+  )
 
 proc blockingPlayersForPixels(
   sim: SimServer,
@@ -1077,15 +1023,10 @@ proc blockingPlayersForPixels(
   let player = sim.players[playerIndex]
   for cell in pieceCells(player.pieceKind, rotation):
     let
+      cellY = pixelY div CellPixels
       x = cellX + cell.x
-      topY = pixelY + cell.y * CellPixels
-      bottomY = topY + CellPixels - 1
-      blocker = sim.activeBlockerAtPixels(
-        ignoredPlayers,
-        x,
-        topY,
-        bottomY
-      )
+      y = cellY + cell.y
+      blocker = sim.activeBlockerAt(ignoredPlayers, x, y)
     if blocker >= 0:
       result.addUniqueInt(blocker)
 
@@ -1167,7 +1108,7 @@ proc drawPiece(
   for cell in pieceCells(player.pieceKind, player.rotation):
     let
       worldX = (player.cellX + cell.x) * CellPixels
-      worldY = player.piecePixelY(cell)
+      worldY = player.pieceCellPixelY(cell)
       screenX = worldX - cameraX
       screenY = worldY - cameraY
     fb.putRect(screenX, screenY, CellPixels, CellPixels, color)
@@ -1326,6 +1267,26 @@ proc clearSpawnPocket(sim: var SimServer, kind: PieceKind, cellX, cellY: int) =
     sim.settledConnections[index] = 0
   sim.settledCellsDirty = true
 
+proc canForceSpawnAt(
+  sim: SimServer,
+  kind: PieceKind,
+  cellX,
+  cellY: int
+): bool =
+  ## Returns true when a forced spawn pocket avoids terrain and players.
+  let ignoredPlayers: array[0, int] = []
+  for cell in pieceCells(kind, 0):
+    let
+      x = cellX + cell.x
+      y = cellY + cell.y
+    if not inBoardBounds(x, y):
+      return false
+    if sim.terrain[boardIndex(x, y)]:
+      return false
+    if sim.activeBlockerAt(ignoredPlayers, x, y) >= 0:
+      return false
+  true
+
 proc findForcedSpawnPosition(
   sim: var SimServer,
   kind: PieceKind
@@ -1338,25 +1299,14 @@ proc findForcedSpawnPosition(
   let
     columnCount = limits.maxX - limits.minX + 1
     startX = limits.minX + sim.rng.rand(columnCount - 1)
-    ignoredPlayers: array[0, int] = []
   for i in 0 ..< columnCount:
     let cellX = limits.minX + ((startX - limits.minX + i) mod columnCount)
     for cellY in 0 ..< BaseTerrainY:
-      var blockedByActive = false
-      for cell in pieceCells(kind, 0):
-        let
-          x = cellX + cell.x
-          y = cellY + cell.y
-        if not inBoardBounds(x, y) or sim.terrain[boardIndex(x, y)]:
-          blockedByActive = true
-          break
-        if sim.activeBlockerAt(ignoredPlayers, x, y) >= 0:
-          blockedByActive = true
-          break
-      if blockedByActive:
+      if not sim.canForceSpawnAt(kind, cellX, cellY):
         continue
       sim.clearSpawnPocket(kind, cellX, cellY)
-      return (found: true, x: cellX, y: cellY)
+      if sim.canPlace(cellX, cellY, kind, 0):
+        return (found: true, x: cellX, y: cellY)
 
 proc findSpawnPosition(
   sim: var SimServer,
@@ -1398,6 +1348,7 @@ proc respawnPlayer(sim: var SimServer, playerIndex, centerX, topY: int, recenter
     sim.players[playerIndex].pendingSpawn = true
     sim.players[playerIndex].pendingSpawnCenterX = centerX
     sim.players[playerIndex].pendingSpawnTopY = topY
+    sim.players[playerIndex].pendingSpawnWaitClear = false
     return
 
   sim.players[playerIndex].alive = true
@@ -1413,6 +1364,7 @@ proc respawnPlayer(sim: var SimServer, playerIndex, centerX, topY: int, recenter
     sim.players[playerIndex].pieceBottomY()
   sim.players[playerIndex].positionCameraForSpawn(recenterHoriz)
   sim.players[playerIndex].pendingSpawn = false
+  sim.players[playerIndex].pendingSpawnWaitClear = false
 
 proc addPlayer(sim: var SimServer, name: string): int =
   inc sim.nextPlayerId
@@ -1789,9 +1741,9 @@ proc hasStaticSupportBelow(sim: SimServer, playerIndex: int): bool =
       not sim.players[playerIndex].hasPiece:
     return false
   let player = sim.players[playerIndex]
-  not sim.canPlaceStatic(
+  not sim.canPlaceStaticPixels(
     player.cellX,
-    player.cellY + 1,
+    player.pixelY + 1,
     player.pieceKind,
     player.rotation
   )
@@ -1886,14 +1838,31 @@ proc enqueueDetectedClears(sim: var SimServer, triggerPlayerId: int): bool =
     if sim.segmentQueued(segment):
       continue
     sim.clearQueue.add sim.pendingClearFor(segment, triggerPlayerId)
-    sim.clearCascadePlayerId = triggerPlayerId
     result = true
+
+proc releaseClearSpawnWait(sim: var SimServer, triggerPlayerId: int) =
+  ## Releases pending spawns that were waiting on this player's clear.
+  for player in sim.players.mitems:
+    if player.id == triggerPlayerId and player.pendingSpawnWaitClear:
+      player.pendingSpawnWaitClear = false
+
+proc clearQueuedFor(sim: SimServer, triggerPlayerId: int): bool =
+  ## Returns true when a queued clear belongs to one player.
+  for clear in sim.clearQueue:
+    if clear.triggerPlayerId == triggerPlayerId:
+      return true
+
+proc releaseClearSpawnWaitIfDone(sim: var SimServer, triggerPlayerId: int) =
+  ## Releases a player's spawn when their clear chain is done.
+  if not sim.clearQueuedFor(triggerPlayerId):
+    sim.releaseClearSpawnWait(triggerPlayerId)
 
 proc startNextClear(sim: var SimServer): bool =
   while sim.clearQueue.len > 0:
     sim.activeClear = sim.clearQueue[0]
     sim.clearQueue.delete(0)
     if not sim.segmentStillFilled(sim.activeClear.segment):
+      sim.releaseClearSpawnWaitIfDone(sim.activeClear.triggerPlayerId)
       continue
     sim.activeClearValid = true
     sim.clearFlashTimer = ClearFlashTicks
@@ -1902,49 +1871,44 @@ proc startNextClear(sim: var SimServer): bool =
   false
 
 proc finishPendingRespawns(sim: var SimServer) =
+  ## Retries all pending player respawns.
   for playerIndex in 0 ..< sim.players.len:
-    if sim.players[playerIndex].pendingSpawn:
-      sim.respawnPlayer(
-        playerIndex,
-        sim.players[playerIndex].pendingSpawnCenterX,
-        sim.players[playerIndex].pendingSpawnTopY
-      )
+    if not sim.players[playerIndex].pendingSpawn:
+      continue
+    if sim.players[playerIndex].pendingSpawnWaitClear:
+      continue
+    sim.respawnPlayer(
+      playerIndex,
+      sim.players[playerIndex].pendingSpawnCenterX,
+      sim.players[playerIndex].pendingSpawnTopY
+    )
 
 proc finalizeActiveClear(sim: var SimServer) =
   if not sim.activeClearValid:
     return
 
+  let triggerPlayerId = sim.activeClear.triggerPlayerId
   sim.awardPendingClear(sim.activeClear)
   sim.clearSegments([sim.activeClear.segment])
   discard sim.dropUnsupportedSettledBlocks()
-  sim.clearDisplayPlayerId = sim.activeClear.triggerPlayerId
+  sim.clearDisplayPlayerId = triggerPlayerId
   sim.activeClearValid = false
   sim.clearFlashTimer = 0
 
-  discard sim.enqueueDetectedClears(sim.clearCascadePlayerId)
-  sim.clearPauseTimer = ClearPauseTicks
+  discard sim.enqueueDetectedClears(triggerPlayerId)
+  sim.releaseClearSpawnWaitIfDone(triggerPlayerId)
 
 proc tickClearAnimation(sim: var SimServer) =
   if sim.activeClearValid:
     dec sim.clearFlashTimer
-    if sim.clearFlashTimer <= 0:
-      sim.finalizeActiveClear()
-    return
-
-  if sim.clearPauseTimer > 0:
-    dec sim.clearPauseTimer
-    if sim.clearPauseTimer == 0:
-      if not sim.startNextClear():
-        sim.clearDisplayPlayerId = 0
-        sim.finishPendingRespawns()
-    return
+    if sim.clearFlashTimer > 0:
+      return
+    sim.finalizeActiveClear()
 
   if sim.clearQueue.len > 0:
     discard sim.startNextClear()
-
-proc spawningPaused(sim: SimServer): bool =
-  ## Returns true when line-clear timing should hold pending spawns.
-  sim.activeClearValid or sim.clearPauseTimer > 0 or sim.clearQueue.len > 0
+  elif not sim.activeClearValid:
+    sim.clearDisplayPlayerId = 0
 
 proc lockPiece(sim: var SimServer, playerIndex: int) =
   ## Settles one active piece when its current cells are still valid.
@@ -2000,7 +1964,8 @@ proc lockPiece(sim: var SimServer, playerIndex: int) =
     sim.players[playerIndex].pendingSpawn = true
     sim.players[playerIndex].pendingSpawnCenterX = nextCenterX
     sim.players[playerIndex].pendingSpawnTopY = nextTopY
-    if not sim.activeClearValid and sim.clearPauseTimer == 0:
+    sim.players[playerIndex].pendingSpawnWaitClear = true
+    if not sim.activeClearValid:
       discard sim.startNextClear()
   else:
     sim.respawnPlayer(playerIndex, nextCenterX, nextTopY)
@@ -2270,12 +2235,12 @@ proc addBackgroundSprite(
   width,
   height: int
 ) =
-  ## Appends the off-gray background sprite once per viewer.
+  ## Appends the black background sprite once per viewer.
   if state.sentBackgroundSprite:
     return
   state.sentBackgroundSprite = true
   let sprite = solidRgbaSprite(width, height, BackgroundRgba)
-  packet.addRgbaSprite(GlobalBackgroundSpriteId, sprite, "off gray background")
+  packet.addRgbaSprite(GlobalBackgroundSpriteId, sprite, "black background")
 
 proc ownerBlockSpriteBase(owner: int): int =
   ## Returns the first sprite id for one owner color set.
@@ -2636,7 +2601,7 @@ proc overlayRgbaPiece(
   for cell in pieceCells(player.pieceKind, player.rotation):
     let
       screenX = (player.cellX + cell.x) * CellPixels - cameraX
-      screenY = player.piecePixelY(cell) - cameraY
+      screenY = player.pieceCellPixelY(cell) - cameraY
     pixels.putRgbaRectMasked(
       frame,
       screenX,
@@ -2818,7 +2783,7 @@ proc buildGlobalFramePacket(
       result.addObjectIfRoom(
         objectId,
         (otherPlayer.cellX + cell.x) * CellPixels - cameraX,
-        otherPlayer.piecePixelY(cell) - cameraY,
+        otherPlayer.pieceCellPixelY(cell) - cameraY,
         3,
         ownerBlockSpriteId(
           otherPlayer.id,
@@ -2859,6 +2824,17 @@ proc buildGlobalFramePacket(
       4,
       ownerBlockSpriteId(player.id, pieceConnectionMask(player.nextKind, 0, cell))
     )
+
+proc buildPlayerViewerPacket(
+  sim: var SimServer,
+  playerIndex: int,
+  state: GlobalViewerState,
+  nextState: var GlobalViewerState
+): seq[uint8] =
+  ## Builds one player POV packet with the score panel overlay.
+  result = sim.buildGlobalFramePacket(playerIndex, state, nextState)
+  if playerIndex >= 0 and playerIndex < sim.players.len:
+    result.addGlobalScorePanel(sim, nextState, playerIndex)
 
 proc buildGlobalMapPacket(
   sim: var SimServer,
@@ -2931,7 +2907,7 @@ proc buildGlobalMapPacket(
       result.addObjectIfRoom(
         objectId,
         (player.cellX + cell.x) * CellPixels,
-        player.piecePixelY(cell),
+        player.pieceCellPixelY(cell),
         3,
         ownerBlockSpriteId(player.id, player.playerConnectionMask(cell))
       )
@@ -3041,8 +3017,7 @@ proc step(sim: var SimServer, inputs: openArray[InputState]) =
   sim.keepPlayersAlive()
   sim.tickChatMessages()
   sim.tickClearAnimation()
-  if not sim.spawningPaused():
-    sim.finishPendingRespawns()
+  sim.finishPendingRespawns()
 
   for playerIndex in 0 ..< sim.players.len:
     let input =
@@ -3667,7 +3642,7 @@ proc runServerLoop(
       for i in 0 ..< sockets.len:
         var nextState: GlobalViewerState
         let framePacket = blobFromBytes(
-          buildGlobalFramePacket(
+          buildPlayerViewerPacket(
             sim,
             playerIndices[i],
             playerGlobalStates[i],
@@ -3698,7 +3673,7 @@ proc runServerLoop(
     for i in 0 ..< sockets.len:
       var nextState: GlobalViewerState
       let frameBlob = blobFromBytes(
-        buildGlobalFramePacket(
+        buildPlayerViewerPacket(
           sim,
           playerIndices[i],
           playerGlobalStates[i],
