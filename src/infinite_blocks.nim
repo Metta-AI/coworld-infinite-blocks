@@ -3236,6 +3236,18 @@ proc playerJoinAllowed(slot: int, token: string): bool =
     return false
   token == appState.tokens[slot]
 
+proc hasPlayerCredentialParams(name, slot, token: string): bool =
+  ## Returns true when query fields identify a player connection.
+  name.strip().len > 0 or slot.strip().len > 0 or token.strip().len > 0
+
+proc hasPlayerCredentialParams(request: Request): bool =
+  ## Returns true when a websocket request carries player credentials.
+  hasPlayerCredentialParams(
+    request.queryParams.getOrDefault("name", ""),
+    request.queryParams.getOrDefault("slot", ""),
+    request.queryParams.getOrDefault("token", "")
+  )
+
 proc respondForbidden(request: Request, body: string) =
   ## Rejects a websocket request before upgrade.
   var headers: HttpHeaders
@@ -3243,6 +3255,12 @@ proc respondForbidden(request: Request, body: string) =
   headers["Cache-Control"] = "no-cache"
   headers["Connection"] = "close"
   request.respond(403, headers, body)
+
+proc respondForbiddenViewer(request: Request) =
+  ## Rejects a viewer websocket request with player credentials.
+  request.respondForbidden(
+    "viewer websocket cannot include player name, slot, or token\n"
+  )
 
 proc isWebSocketUpgrade(request: Request): bool =
   ## Returns true when the request is a websocket upgrade.
@@ -3418,6 +3436,9 @@ proc httpHandler(request: Request) =
       request.path == ReplayWebSocketPath or
       request.path == AdminWebSocketPath) and
       request.httpMethod == "GET" and request.isWebSocketUpgrade():
+    if request.hasPlayerCredentialParams():
+      request.respondForbiddenViewer()
+      return
     let websocket = request.upgradeToWebSocket()
     {.gcsafe.}:
       withLock appState.lock:
@@ -3444,6 +3465,9 @@ proc httpHandler(request: Request) =
         appState.globalSendReady[websocket] = true
   elif request.path == RewardWebSocketPath and request.httpMethod == "GET" and
       request.isWebSocketUpgrade():
+    if request.hasPlayerCredentialParams():
+      request.respondForbiddenViewer()
+      return
     let websocket = request.upgradeToWebSocket()
     {.gcsafe.}:
       withLock appState.lock:
