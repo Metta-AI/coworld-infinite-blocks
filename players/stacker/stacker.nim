@@ -2090,6 +2090,7 @@ proc runBot(
     bot = initBot()
     viewer = initViewerApp()
     connected = false
+    everConnected = false
 
   while viewer.viewerOpen():
     try:
@@ -2098,6 +2099,7 @@ proc runBot(
         playerWs = newWebSocket(playerUrl)
         globalWs = newWebSocket(mapUrl)
       connected = true
+      everConnected = true
       playerWs.send(chatBlob("stacker online"), BinaryMessage)
       discard playerWs.receiveUpdates(bot, true, -1)
       discard globalWs.receiveUpdates(bot, false, 0)
@@ -2132,6 +2134,10 @@ proc runBot(
         when defined(gui):
           viewer.pumpViewer(bot, connected, playerUrl)
     except CatchableError as e:
+      when not defined(gui):
+        if everConnected:
+          echo "stacker exiting: ", e.msg
+          return
       echo "stacker reconnecting: ", e.msg
       connected = false
       when defined(gui):

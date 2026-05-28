@@ -102,6 +102,7 @@ type
     seed: int
     maxTicks: int
     maxGames: int
+    tokens: seq[string]
 
   PieceKind = enum
     PieceHook
@@ -210,6 +211,7 @@ type
     lastAppliedMasks: Table[WebSocket, uint8]
     playerIndices: Table[WebSocket, int]
     playerNames: Table[WebSocket, string]
+    tokens: seq[string]
     chatMessages: Table[WebSocket, string]
     closedSockets: seq[WebSocket]
     spritePlayerViewers: Table[WebSocket, GlobalViewerState]
@@ -3035,6 +3037,7 @@ proc initAppState() =
   appState.lastAppliedMasks = initTable[WebSocket, uint8]()
   appState.playerIndices = initTable[WebSocket, int]()
   appState.playerNames = initTable[WebSocket, string]()
+  appState.tokens = @[]
   appState.chatMessages = initTable[WebSocket, string]()
   appState.closedSockets = @[]
   appState.spritePlayerViewers = initTable[WebSocket, GlobalViewerState]()
@@ -3209,6 +3212,38 @@ proc playerIdentity(request: Request): string =
     return parts[0] & ":" & parts[1]
   request.remoteAddress
 
+proc playerSlot(request: Request): int =
+  ## Returns the requested player slot, or -1 when omitted.
+  let text = request.queryParams.getOrDefault("slot", "").strip()
+  if text.len == 0:
+    return -1
+  try:
+    result = parseInt(text)
+  except ValueError:
+    return high(int)
+  if result < 0:
+    return high(int)
+
+proc playerToken(request: Request): string =
+  ## Returns the requested player token.
+  request.queryParams.getOrDefault("token", "").strip()
+
+proc playerJoinAllowed(slot: int, token: string): bool =
+  ## Returns true when a player request has valid credentials.
+  if appState.tokens.len == 0:
+    return true
+  if slot < 0 or slot >= appState.tokens.len:
+    return false
+  token == appState.tokens[slot]
+
+proc respondForbidden(request: Request, body: string) =
+  ## Rejects a websocket request before upgrade.
+  var headers: HttpHeaders
+  headers["Content-Type"] = "text/plain; charset=utf-8"
+  headers["Cache-Control"] = "no-cache"
+  headers["Connection"] = "close"
+  request.respond(403, headers, body)
+
 proc isWebSocketUpgrade(request: Request): bool =
   ## Returns true when the request is a websocket upgrade.
   request.headers["Sec-WebSocket-Key"].len > 0
@@ -3349,6 +3384,16 @@ proc httpHandler(request: Request) =
   elif request.path == PlayerWebSocketPath and
       request.httpMethod == "GET" and
       request.isWebSocketUpgrade():
+    let
+      slot = request.playerSlot()
+      token = request.playerToken()
+    var allowed = false
+    {.gcsafe.}:
+      withLock appState.lock:
+        allowed = playerJoinAllowed(slot, token)
+    if not allowed:
+      request.respondForbidden("player token rejected\n")
+      return
     let websocket = request.upgradeToWebSocket()
     {.gcsafe.}:
       withLock appState.lock:
@@ -3520,9 +3565,11 @@ proc runServerLoop(
   seed = 0x1F1B10C,
   maxTicks = DefaultMaxTicks,
   maxGames = 0,
-  runtimeConfig = RuntimeConfig()
+  runtimeConfig = RuntimeConfig(),
+  tokens: seq[string] = @[]
 ) =
   initAppState()
+  appState.tokens = tokens
 
   let httpServer = newServer(
     httpHandler,
@@ -3732,6 +3779,26 @@ proc readConfigInt(node: JsonNode, name: string, value: var int) =
     raise newException(ValueError, "Config field " & name & " must be an integer.")
   value = item.getInt()
 
+proc readConfigStrings(node: JsonNode, name: string, values: var seq[string]) =
+  ## Reads one optional string array config field.
+  if not node.hasKey(name):
+    return
+  let items = node[name]
+  if items.kind != JArray:
+    raise newException(
+      ValueError,
+      "Config field " & name & " must be an array."
+    )
+  values.setLen(0)
+  for i in 0 ..< items.len:
+    let item = items[i]
+    if item.kind != JString:
+      raise newException(
+        ValueError,
+        "Config field " & name & "[" & $i & "] must be a string."
+      )
+    values.add(item.getStr())
+
 proc update(config: var RunConfig, jsonText: string) =
   if jsonText.len == 0:
     return
@@ -3747,6 +3814,7 @@ proc update(config: var RunConfig, jsonText: string) =
   node.readConfigInt("max-ticks", config.maxTicks)
   node.readConfigInt("maxGames", config.maxGames)
   node.readConfigInt("max-games", config.maxGames)
+  node.readConfigStrings("tokens", config.tokens)
 
 when isMainModule:
   let runtimeConfig = readRuntimeConfig()
@@ -3756,7 +3824,8 @@ when isMainModule:
       port: runtimeConfig.port,
       seed: 0x1F1B10C,
       maxTicks: DefaultMaxTicks,
-      maxGames: 0
+      maxGames: 0,
+      tokens: @[]
     )
   config.update(runtimeConfig.config)
   if runtimeConfig.resultsUri.len > 0:
@@ -3767,5 +3836,6 @@ when isMainModule:
     seed = config.seed,
     maxTicks = config.maxTicks,
     maxGames = config.maxGames,
-    runtimeConfig = runtimeConfig
+    runtimeConfig = runtimeConfig,
+    tokens = config.tokens
   )
