@@ -1,7 +1,7 @@
 import
   std/[algorithm, os, parseopt, random, strutils, tables, times, uri],
   supersnappy, whisky,
-  bitworld/protocol
+  bitworld/spriteprotocol
 
 when defined(gui):
   import pixie, bitworld/scales, silky, windy
