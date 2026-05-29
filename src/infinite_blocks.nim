@@ -2,7 +2,9 @@ import
   std/[algorithm, json, locks, monotimes, os, random, strutils,
     tables, times],
   jsony, mummy, pixie,
-  bitworld/aseprite, bitworld/client, bitworld/runtime, bitworld/pixelfonts, bitworld/spriteprotocol, bitworld/server
+  bitworld/aseprite, bitworld/client, bitworld/runtime,
+  bitworld/pixelfonts, bitworld/spriteprotocol, bitworld/server,
+  bitworld/sprites
 
 const
   BoardWidthCells = 125
@@ -85,14 +87,19 @@ const
   NameGapY = 2
   ChatLifetimeTicks = TargetFps * 5
   GlobalNameSpriteBase = 51000
-  BackgroundRgba = (r: 0'u8, g: 0'u8, b: 0'u8, a: 255'u8)
+  BackgroundRgba = RgbaColor(r: 0'u8, g: 0'u8, b: 0'u8, a: 255'u8)
   ScorePanelPipSize = 3
   ScorePanelPipGapX = 2
   ScorePanelNameGapX = 3
   ScorePanelMaxScoreChars = 16
   ScorePanelMaxRows = 128
-  ScorePanelColor = (r: 255'u8, g: 255'u8, b: 255'u8, a: 255'u8)
-  ScorePanelSelectedColor = (r: 255'u8, g: 245'u8, b: 140'u8, a: 255'u8)
+  ScorePanelColor = RgbaColor(r: 255'u8, g: 255'u8, b: 255'u8, a: 255'u8)
+  ScorePanelSelectedColor = RgbaColor(
+    r: 255'u8,
+    g: 245'u8,
+    b: 140'u8,
+    a: 255'u8
+  )
   PlayerColors = [4'u8, 5'u8, 6'u8, 7'u8, 8'u8, 9'u8, 10'u8, 11'u8, 12'u8, 13'u8, 14'u8, 15'u8]
 
 type
@@ -127,13 +134,6 @@ type
     lineLength: int
     colorCount: int
     scoreValue: int
-
-  RgbaColor = tuple[r, g, b, a: uint8]
-
-  RgbaSprite = object
-    width: int
-    height: int
-    pixels: seq[uint8]
 
   Player = object
     id: int
@@ -316,54 +316,6 @@ proc putRect(fb: var Framebuffer, x, y, w, h: int, color: uint8) =
     for px in 0 ..< w:
       fb.putPixel(x + px, y + py, color)
 
-proc rgbaSpriteIndex(sprite: RgbaSprite, x, y: int): int =
-  ## Returns the byte offset for one RGBA sprite pixel.
-  (y * sprite.width + x) * 4
-
-proc rgbaSpriteAt(sprite: RgbaSprite, x, y: int): RgbaColor =
-  ## Reads one RGBA sprite pixel.
-  if x < 0 or y < 0 or x >= sprite.width or y >= sprite.height:
-    return
-  let offset = sprite.rgbaSpriteIndex(x, y)
-  (
-    r: sprite.pixels[offset],
-    g: sprite.pixels[offset + 1],
-    b: sprite.pixels[offset + 2],
-    a: sprite.pixels[offset + 3]
-  )
-
-proc putRgbaSpritePixel(
-  sprite: var RgbaSprite,
-  x, y: int,
-  color: RgbaColor
-) =
-  ## Writes one RGBA sprite pixel.
-  if x < 0 or y < 0 or x >= sprite.width or y >= sprite.height:
-    return
-  let offset = sprite.rgbaSpriteIndex(x, y)
-  sprite.pixels[offset] = color.r
-  sprite.pixels[offset + 1] = color.g
-  sprite.pixels[offset + 2] = color.b
-  sprite.pixels[offset + 3] = color.a
-
-proc newRgbaSprite(width, height: int): RgbaSprite =
-  ## Allocates one transparent true-color sprite.
-  result.width = width
-  result.height = height
-  result.pixels = newSeq[uint8](max(0, width * height * 4))
-
-proc stainColor(source, tint: RgbaColor): RgbaColor =
-  ## Applies a player tint while preserving sprite alpha.
-  if source.a == 0'u8:
-    return
-  let strength = max(int(source.r), max(int(source.g), int(source.b)))
-  (
-    r: uint8(int(tint.r) * strength div 255),
-    g: uint8(int(tint.g) * strength div 255),
-    b: uint8(int(tint.b) * strength div 255),
-    a: source.a
-  )
-
 proc blitPart(
   target: var RgbaSprite,
   part: RgbaSprite,
@@ -379,11 +331,7 @@ proc blitPart(
 
 proc blankRgbaSprite(): RgbaSprite =
   ## Builds one empty 9x9 RGBA sprite.
-  RgbaSprite(
-    width: BlockSpritePixels,
-    height: BlockSpritePixels,
-    pixels: newSeq[uint8](BlockSpritePixels * BlockSpritePixels * 4)
-  )
+  blankRgbaSprite(BlockSpritePixels, BlockSpritePixels)
 
 proc sliceBlockPart(image: Image, index: int): RgbaSprite =
   ## Slices one 9x9 block-part sprite from the second atlas row.
@@ -397,11 +345,7 @@ proc sliceBlockPart(image: Image, index: int): RgbaSprite =
   for y in 0 ..< BlockSpritePixels:
     for x in 0 ..< BlockSpritePixels:
       let pixel = image[tileX + x, tileY + y]
-      result.putRgbaSpritePixel(
-        x,
-        y,
-        (r: pixel.r, g: pixel.g, b: pixel.b, a: pixel.a)
-      )
+      result.putRgbaSpritePixel(x, y, pixel)
 
 proc loadBlockParts(path: string): array[BlockPartCount, RgbaSprite] =
   ## Loads the second-row 9x9 block part sprites.
@@ -480,7 +424,7 @@ proc textLineSprite(
   let
     width = max(1, sim.chatTextWidth(text) + 1)
     height = max(1, sim.textFont.height + 1)
-    shadow = (r: 0'u8, g: 0'u8, b: 0'u8, a: 180'u8)
+    shadow = RgbaColor(r: 0'u8, g: 0'u8, b: 0'u8, a: 180'u8)
   result = newRgbaSprite(width, height)
   sim.blitChatText(result, text, 1, 1, shadow)
   sim.blitChatText(result, text, 0, 0, color)
@@ -496,19 +440,6 @@ proc plainTextSprite(
     height = max(1, sim.textFont.height)
   result = newRgbaSprite(width, height)
   sim.blitChatText(result, text, 0, 0, color)
-
-proc fillRect(
-  sprite: var RgbaSprite,
-  x,
-  y,
-  width,
-  height: int,
-  color: RgbaColor
-) =
-  ## Fills one rectangle in a true-color sprite.
-  for py in 0 ..< height:
-    for px in 0 ..< width:
-      sprite.putRgbaSpritePixel(x + px, y + py, color)
 
 proc compareScorePanelPlayerIndices(
   sim: SimServer,
@@ -640,8 +571,8 @@ proc speechBubbleSprite(
     lineHeight = sim.textFont.height
     bodyWidth = textWidth + ChatPad * 2
     bodyHeight = lineHeight + ChatPad * 2
-    fill = (r: 0'u8, g: 0'u8, b: 0'u8, a: alpha)
-    border = (r: 0'u8, g: 0'u8, b: 0'u8, a: alpha)
+    fill = RgbaColor(r: 0'u8, g: 0'u8, b: 0'u8, a: alpha)
+    border = RgbaColor(r: 0'u8, g: 0'u8, b: 0'u8, a: alpha)
   result = newRgbaSprite(bodyWidth, bodyHeight + ChatPointerHeight)
   for y in 0 ..< bodyHeight:
     for x in 0 ..< bodyWidth:
@@ -662,7 +593,7 @@ proc speechBubbleSprite(
     text,
     ChatPad,
     ChatPad,
-    (r: 255'u8, g: 255'u8, b: 255'u8, a: alpha)
+    RgbaColor(r: 255'u8, g: 255'u8, b: 255'u8, a: alpha)
   )
 
 proc composeBlockSprite(
@@ -802,7 +733,7 @@ proc brightHsvColor(hueDegrees: int): RgbaColor =
     r = value
     g = p
     b = q
-  (
+  RgbaColor(
     r: colorChannel(r),
     g: colorChannel(g),
     b: colorChannel(b),
@@ -2143,18 +2074,11 @@ proc addScorePanelPlayerSprites(
 
 proc terrainRgbaColor(): RgbaColor =
   ## Returns the neutral floor color.
-  (r: 104'u8, g: 116'u8, b: 130'u8, a: 255'u8)
+  RgbaColor(r: 104'u8, g: 116'u8, b: 130'u8, a: 255'u8)
 
 proc clearRgbaColor(): RgbaColor =
   ## Returns the line-clear flash color.
-  (r: 255'u8, g: 255'u8, b: 255'u8, a: 255'u8)
-
-proc solidRgbaSprite(width, height: int, color: RgbaColor): RgbaSprite =
-  ## Builds one solid true-color sprite.
-  result = newRgbaSprite(width, height)
-  for y in 0 ..< height:
-    for x in 0 ..< width:
-      result.putRgbaSpritePixel(x, y, color)
+  RgbaColor(r: 255'u8, g: 255'u8, b: 255'u8, a: 255'u8)
 
 proc addBackgroundSprite(
   packet: var seq[uint8],
@@ -2248,13 +2172,7 @@ proc addOwnerBlockSprites(
 
 proc paletteRgbaColor(color: uint8): RgbaColor =
   ## Returns one palette color as a true-color RGBA value.
-  let rgba = Palette[int(color and 0x0f'u8)]
-  (
-    r: rgba.r,
-    g: rgba.g,
-    b: rgba.b,
-    a: rgba.a
-  )
+  Palette[int(color and 0x0f'u8)]
 
 proc blockRgbaColor(owner: int, fallbackColor: uint8): RgbaColor =
   ## Returns a true-color block color for an owner.
@@ -2327,7 +2245,7 @@ proc addNameLabel(
     state.sentNameLabels.add(player.id)
     let sprite = sim.textLineSprite(
       text,
-      (r: 255'u8, g: 255'u8, b: 255'u8, a: 255'u8)
+      RgbaColor(r: 255'u8, g: 255'u8, b: 255'u8, a: 255'u8)
     )
     packet.addRgbaSprite(
       GlobalNameSpriteBase + (player.id mod 1000),
