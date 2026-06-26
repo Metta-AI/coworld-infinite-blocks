@@ -27,9 +27,10 @@ ENV PATH="/root/.nimby/nim/bin:$PATH"
 
 WORKDIR /workspace/coworld-infinite-blocks
 COPY nimby.lock .
-RUN nimby --global sync nimby.lock
+RUN nimby sync nimby.lock -g
 
 COPY . .
+RUN nimby sync nimby.lock -g
 RUN nim c \
   -d:release \
   --path:src \
