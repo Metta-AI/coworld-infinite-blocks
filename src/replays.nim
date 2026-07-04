@@ -13,10 +13,13 @@ type
     prevMasks*: seq[uint8]
     playing*: bool
     looping*: bool
+    speedIndex*: int
     hashValidationFailed*: bool
     hashMismatchTick*: int
 
 const
+  PlaybackSpeeds* = [1, 2, 3, 4, 8, 16]
+  ReplayKeyframeTicks* = 100
   ReplayFps* = 30
   InfiniteBlocksGameName* = "infinite_blocks"
   InfiniteBlocksGameVersion* = "0.1.0"
@@ -76,7 +79,12 @@ proc initReplayPlayer*(data: ReplayData): ReplayPlayer =
   result.prevMasks = @[]
   result.playing = true
   result.looping = true
+  result.speedIndex = 0
   result.hashMismatchTick = -1
+
+proc replaySpeed*(replay: ReplayPlayer): int =
+  ## Returns the current integer replay speed.
+  PlaybackSpeeds[clamp(replay.speedIndex, 0, PlaybackSpeeds.high)]
 
 proc replayMaxTick*(replay: ReplayPlayer): int =
   ## Returns the final tick available in the replay.

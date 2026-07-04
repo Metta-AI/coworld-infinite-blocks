@@ -84,4 +84,26 @@ block:
     "playback should reproduce the final game hash"
   doAssert playSim.gameHash() == data.hashes[^1].hash,
     "final hash should match the recorded stream"
+
+  echo "Testing replay keyframe seeks"
+  block:
+    let keyframes = data.buildReplayKeyframes(TestSeed, interval = 100)
+    doAssert keyframes.len == 3, "200 ticks should give keyframes 0/100/200"
+    var
+      seekSim = initSimServer(TestSeed)
+      seeker = initReplayPlayer(data)
+    for target in [0, 1, 42, 99, 100, 101, 155, 200, 55, 100, 7]:
+      seeker.applyReplaySeek(seekSim, keyframes, target)
+      doAssert not seeker.playing, "seeking should pause playback"
+      doAssert seekSim.tickCount == target,
+        "seek should land on tick " & $target
+      if target > 0:
+        doAssert seekSim.gameHash() == data.hashes[target - 1].hash,
+          "seek to tick " & $target & " should match the recorded hash"
+    seeker.applyReplayCommand(seekSim, keyframes, ' ')
+    doAssert seeker.playing, "space should resume playback"
+    seeker.applyReplayCommand(seekSim, keyframes, '8')
+    doAssert seeker.replaySpeed() == 8, "speed 8x should apply"
+    seeker.applyReplayCommand(seekSim, keyframes, 'e')
+    doAssert seekSim.tickCount == 200, "end command should seek to the end"
   removeFile(replayPath)

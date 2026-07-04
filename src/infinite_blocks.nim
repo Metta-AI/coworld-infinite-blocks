@@ -41,8 +41,22 @@ const
   SendPingPayload = "ib"
   GlobalLayerId = 0
   GlobalScorePanelLayerId = 1
+  GlobalReplayControlsLayerId = 2
   GlobalTopLeftLayerType = 1
+  GlobalBottomCenterLayerType = 8
   GlobalUiFlag = 2
+  ReplayControlsSpriteId = 55000
+  ReplayControlsObjectId = 60000
+  ReplayControlsWidth = 160
+  ReplayControlsHeight = 20
+  ReplayButtonTextY = 1
+  ReplayButtonRowHeight = 10
+  ReplaySpeedTextX = 86
+  ReplayScrubberX = 2
+  ReplayScrubberY = 12
+  ReplayScrubberHeight = 6
+  ReplayScrubberTrackY = 14
+  ReplayScrubberWidth = ReplayControlsWidth - 2 * ReplayScrubberX
   GlobalFrameObjectBase = 10
   GlobalBackgroundSpriteId = 2
   GlobalTerrainSpriteBase = 20
@@ -200,6 +214,15 @@ type
     pendingScorePanelClick: bool
     pendingScorePanelClickX: int
     pendingScorePanelClickY: int
+    mouseX: int
+    mouseY: int
+    mouseLayer: int
+    mouseDown: bool
+    mousePressed: bool
+    mouseReleased: bool
+    scrubbingReplay: bool
+    lastReplayBarKey: int
+    sentReplayControls: bool
 
   SocketKind = enum
     SocketUnknown
@@ -238,7 +261,9 @@ proc newGlobalViewerState(): GlobalViewerState =
   ## Allocates one mutable global protocol viewer state.
   GlobalViewerState(
     selectedPlayerIndex: -1,
-    viewPlayerIndex: -1
+    viewPlayerIndex: -1,
+    mouseLayer: -1,
+    lastReplayBarKey: -1
   )
 
 proc viewerState(state: GlobalViewerState): GlobalViewerState =
@@ -2350,6 +2375,182 @@ proc addGlobalScorePanel(
       )
       digitX += sim.textFont.glyphAdvance(ch)
 
+proc fillBarRect(
+  bar: var RgbaSprite,
+  x, y, w, h: int,
+  color: RgbaColor
+) =
+  ## Fills one rectangle inside the replay control bar sprite.
+  for py in y ..< min(y + h, bar.height):
+    for px in x ..< min(x + w, bar.width):
+      bar.putRgbaSpritePixel(px, py, color)
+
+proc replayBarKey(
+  tick, maxTick: int,
+  playing, looping: bool,
+  speedIndex: int
+): int =
+  ## Returns a change key for the rendered replay control bar.
+  let knobX =
+    if maxTick > 0:
+      clamp(tick * (ReplayScrubberWidth - 1) div maxTick,
+        0, ReplayScrubberWidth - 1)
+    else:
+      0
+  knobX or (speedIndex shl 8) or
+    (ord(playing) shl 12) or (ord(looping) shl 13)
+
+proc buildReplayControlsSprite(
+  sim: SimServer,
+  tick, maxTick: int,
+  playing, looping: bool,
+  speedIndex: int
+): RgbaSprite =
+  ## Builds the replay transport controls and scrubber bar sprite.
+  result = newRgbaSprite(ReplayControlsWidth, ReplayControlsHeight)
+  let
+    backdrop = RgbaColor(r: 12'u8, g: 12'u8, b: 20'u8, a: 200'u8)
+    dim = RgbaColor(r: 130'u8, g: 130'u8, b: 140'u8, a: 255'u8)
+    bright = RgbaColor(r: 255'u8, g: 255'u8, b: 255'u8, a: 255'u8)
+    accent = RgbaColor(r: 255'u8, g: 200'u8, b: 80'u8, a: 255'u8)
+  result.fillBarRect(0, 0, ReplayControlsWidth, ReplayControlsHeight, backdrop)
+
+  sim.blitChatText(result, "|<", 4, ReplayButtonTextY, bright)
+  sim.blitChatText(result, "<<", 20, ReplayButtonTextY, bright)
+  if playing:
+    sim.blitChatText(result, "||", 36, ReplayButtonTextY, accent)
+  else:
+    sim.blitChatText(result, "|>", 36, ReplayButtonTextY, bright)
+  sim.blitChatText(result, ">>", 52, ReplayButtonTextY, bright)
+  sim.blitChatText(result, ">|", 68, ReplayButtonTextY, bright)
+
+  let speedTexts = ["1x", "2x", "3x", "4x", "8x", "16x"]
+  for i, text in speedTexts:
+    sim.blitChatText(
+      result,
+      text,
+      ReplaySpeedTextX + i * 12,
+      ReplayButtonTextY,
+      if i == speedIndex: accent else: dim
+    )
+
+  let knobX =
+    if maxTick > 0:
+      ReplayScrubberX + clamp(
+        tick * (ReplayScrubberWidth - 1) div maxTick,
+        0,
+        ReplayScrubberWidth - 1
+      )
+    else:
+      ReplayScrubberX
+  result.fillBarRect(
+    ReplayScrubberX,
+    ReplayScrubberTrackY,
+    ReplayScrubberWidth,
+    2,
+    dim
+  )
+  if knobX > ReplayScrubberX:
+    result.fillBarRect(
+      ReplayScrubberX,
+      ReplayScrubberTrackY,
+      knobX - ReplayScrubberX,
+      2,
+      bright
+    )
+  result.fillBarRect(
+    max(ReplayScrubberX, knobX - 1),
+    ReplayScrubberY,
+    3,
+    ReplayScrubberHeight,
+    accent
+  )
+
+proc replayControlCommandAt(x, y: int): char =
+  ## Returns the replay command for one control bar button click.
+  if y < 0 or y >= ReplayButtonRowHeight:
+    return '\0'
+  case x
+  of 0 .. 15: ','
+  of 16 .. 31: 'B'
+  of 32 .. 47: ' '
+  of 48 .. 63: '.'
+  of 64 .. 79: 'e'
+  of 86 .. 97: '1'
+  of 98 .. 109: '2'
+  of 110 .. 121: '3'
+  of 122 .. 133: '4'
+  of 134 .. 145: '8'
+  of 146 .. 159: '6'
+  else: '\0'
+
+proc replayScrubTickAt(
+  x, y, maxTick: int,
+  requireInside = true
+): int =
+  ## Returns the replay tick under the scrubber pointer.
+  if maxTick <= 0:
+    return -1
+  if requireInside and (
+      y < ReplayScrubberY or y >= ReplayControlsHeight or
+      x < ReplayScrubberX or x >= ReplayScrubberX + ReplayScrubberWidth
+    ):
+    return -1
+  let localX = clamp(x - ReplayScrubberX, 0, ReplayScrubberWidth - 1)
+  clamp(localX * maxTick div (ReplayScrubberWidth - 1), 0, maxTick)
+
+proc addReplayControls(
+  packet: var seq[uint8],
+  state: GlobalViewerState,
+  bar: RgbaSprite,
+  barKey: int
+) =
+  ## Appends the replay control bar layer to one global packet.
+  packet.addLayer(
+    GlobalReplayControlsLayerId,
+    GlobalBottomCenterLayerType,
+    GlobalUiFlag
+  )
+  packet.addViewport(
+    GlobalReplayControlsLayerId,
+    ReplayControlsWidth,
+    ReplayControlsHeight
+  )
+  if state.lastReplayBarKey != barKey:
+    state.lastReplayBarKey = barKey
+    packet.addRgbaSprite(ReplayControlsSpriteId, bar, "replay controls")
+  packet.addObject(
+    ReplayControlsObjectId,
+    0,
+    0,
+    high(int16),
+    GlobalReplayControlsLayerId,
+    ReplayControlsSpriteId
+  )
+
+proc applyReplayViewerMouse(state: GlobalViewerState, data: string) =
+  ## Tracks viewer mouse state for the replay control bar.
+  for item in data.parseSpriteClientMessages():
+    case item.kind
+    of SpriteClientMouseMoveMessage:
+      state.mouseX = item.x
+      state.mouseY = item.y
+      state.mouseLayer =
+        if item.hasLayer:
+          item.layer
+        else:
+          GlobalLayerId
+    of SpriteClientMouseButtonMessage:
+      if item.button == 1'u8:
+        if item.down:
+          state.mouseDown = true
+          state.mousePressed = true
+        else:
+          state.mouseDown = false
+          state.mouseReleased = true
+    else:
+      discard
+
 proc putRgbaColorPixel(
   pixels: var seq[uint8],
   pixelIndex: int,
@@ -3035,6 +3236,223 @@ proc stepReplay*(replay: var ReplayPlayer, sim: var SimServer) =
   sim.step(inputs)
   replay.checkReplayHash(sim)
 
+type
+  SimCore = object
+    ## The deterministic simulation state captured by seek keyframes.
+    tickCount: int
+    players: seq[Player]
+    settledColors: seq[uint8]
+    settledOwners: seq[int]
+    settledConnections: seq[uint8]
+    settledCellIndices: seq[int]
+    settledCellsDirty: bool
+    terrain: seq[bool]
+    rng: Rand
+    nextPlayerId: int
+    flashColor: uint8
+    clearQueue: seq[PendingClear]
+    activeClear: PendingClear
+    activeClearValid: bool
+    clearFlashTimer: int
+    clearDisplayPlayerId: int
+
+  ReplayKeyframe* = object
+    tick*: int
+    core: SimCore
+    joinIndex: int
+    leaveIndex: int
+    inputIndex: int
+    chatIndex: int
+    hashIndex: int
+    masks: seq[uint8]
+    prevMasks: seq[uint8]
+    hashValidationFailed: bool
+    hashMismatchTick: int
+
+proc saveSimCore(sim: SimServer): SimCore =
+  ## Captures the deterministic simulation state for one keyframe.
+  SimCore(
+    tickCount: sim.tickCount,
+    players: sim.players,
+    settledColors: sim.settledColors,
+    settledOwners: sim.settledOwners,
+    settledConnections: sim.settledConnections,
+    settledCellIndices: sim.settledCellIndices,
+    settledCellsDirty: sim.settledCellsDirty,
+    terrain: sim.terrain,
+    rng: sim.rng,
+    nextPlayerId: sim.nextPlayerId,
+    flashColor: sim.flashColor,
+    clearQueue: sim.clearQueue,
+    activeClear: sim.activeClear,
+    activeClearValid: sim.activeClearValid,
+    clearFlashTimer: sim.clearFlashTimer,
+    clearDisplayPlayerId: sim.clearDisplayPlayerId
+  )
+
+proc restoreSimCore(sim: var SimServer, core: SimCore) =
+  ## Restores keyframe state onto a live sim, keeping render resources.
+  sim.tickCount = core.tickCount
+  sim.players = core.players
+  sim.settledColors = core.settledColors
+  sim.settledOwners = core.settledOwners
+  sim.settledConnections = core.settledConnections
+  sim.settledCellIndices = core.settledCellIndices
+  sim.settledCellsDirty = core.settledCellsDirty
+  sim.terrain = core.terrain
+  sim.rng = core.rng
+  sim.nextPlayerId = core.nextPlayerId
+  sim.flashColor = core.flashColor
+  sim.clearQueue = core.clearQueue
+  sim.activeClear = core.activeClear
+  sim.activeClearValid = core.activeClearValid
+  sim.clearFlashTimer = core.clearFlashTimer
+  sim.clearDisplayPlayerId = core.clearDisplayPlayerId
+
+proc saveReplayKeyframe(
+  replay: ReplayPlayer,
+  sim: SimServer
+): ReplayKeyframe =
+  ## Builds one replay keyframe from the current playback state.
+  ReplayKeyframe(
+    tick: sim.tickCount,
+    core: sim.saveSimCore(),
+    joinIndex: replay.joinIndex,
+    leaveIndex: replay.leaveIndex,
+    inputIndex: replay.inputIndex,
+    chatIndex: replay.chatIndex,
+    hashIndex: replay.hashIndex,
+    masks: replay.masks,
+    prevMasks: replay.prevMasks,
+    hashValidationFailed: replay.hashValidationFailed,
+    hashMismatchTick: replay.hashMismatchTick
+  )
+
+proc restoreReplayKeyframe(
+  replay: var ReplayPlayer,
+  sim: var SimServer,
+  keyframe: ReplayKeyframe
+) =
+  ## Restores playback state from one replay keyframe.
+  sim.restoreSimCore(keyframe.core)
+  replay.joinIndex = keyframe.joinIndex
+  replay.leaveIndex = keyframe.leaveIndex
+  replay.inputIndex = keyframe.inputIndex
+  replay.chatIndex = keyframe.chatIndex
+  replay.hashIndex = keyframe.hashIndex
+  replay.masks = keyframe.masks
+  replay.prevMasks = keyframe.prevMasks
+  replay.hashValidationFailed = keyframe.hashValidationFailed
+  replay.hashMismatchTick = keyframe.hashMismatchTick
+
+proc replayKeyframeIndex(keyframes: seq[ReplayKeyframe], tick: int): int =
+  ## Returns the newest keyframe at or before one tick.
+  for i, keyframe in keyframes:
+    if keyframe.tick > tick:
+      break
+    result = i
+
+proc buildReplayKeyframes*(
+  data: ReplayData,
+  seed: int,
+  interval = ReplayKeyframeTicks
+): seq[ReplayKeyframe] =
+  ## Builds seek keyframes by replaying the whole recording once.
+  var
+    sim = initSimServer(seed)
+    builder = initReplayPlayer(data)
+  builder.looping = false
+  result.add(builder.saveReplayKeyframe(sim))
+  let maxTick = builder.replayMaxTick()
+  while builder.playing and sim.tickCount < maxTick:
+    builder.stepReplay(sim)
+    if sim.tickCount mod max(interval, 1) == 0 or sim.tickCount == maxTick:
+      result.add(builder.saveReplayKeyframe(sim))
+
+proc seekReplay*(
+  replay: var ReplayPlayer,
+  sim: var SimServer,
+  keyframes: seq[ReplayKeyframe],
+  tick: int
+) =
+  ## Seeks replay playback to a target tick.
+  if keyframes.len == 0:
+    return
+  replay.restoreReplayKeyframe(
+    sim,
+    keyframes[keyframes.replayKeyframeIndex(tick)]
+  )
+  while sim.tickCount < tick and replay.hashIndex < replay.data.hashes.len:
+    replay.stepReplay(sim)
+
+proc applyReplaySeek*(
+  replay: var ReplayPlayer,
+  sim: var SimServer,
+  keyframes: seq[ReplayKeyframe],
+  tick: int
+) =
+  ## Seeks replay playback and pauses on the target tick.
+  replay.playing = false
+  replay.seekReplay(sim, keyframes, clamp(tick, 0, replay.replayMaxTick()))
+
+proc applyReplayCommand*(
+  replay: var ReplayPlayer,
+  sim: var SimServer,
+  keyframes: seq[ReplayKeyframe],
+  command: char
+) =
+  ## Applies one global viewer replay command.
+  case command
+  of ' ':
+    replay.playing = not replay.playing
+  of 'p':
+    replay.playing = true
+  of 'P':
+    replay.playing = false
+  of '+', '=':
+    replay.speedIndex = min(replay.speedIndex + 1, PlaybackSpeeds.high)
+  of '-', '_':
+    replay.speedIndex = max(replay.speedIndex - 1, 0)
+  of '1':
+    replay.speedIndex = 0
+  of '2':
+    replay.speedIndex = 1
+  of '3':
+    replay.speedIndex = 2
+  of '4':
+    replay.speedIndex = 3
+  of '8':
+    replay.speedIndex = 4
+  of '6':
+    replay.speedIndex = 5
+  of ',', '<':
+    replay.playing = false
+    replay.seekReplay(sim, keyframes, 0)
+  of 'b':
+    replay.playing = false
+    replay.seekReplay(sim, keyframes, max(0, sim.tickCount - 1))
+  of 'B':
+    replay.playing = false
+    replay.seekReplay(
+      sim,
+      keyframes,
+      max(0, sim.tickCount - ReplayFps * 5)
+    )
+  of 'e':
+    replay.playing = false
+    replay.seekReplay(sim, keyframes, replay.replayMaxTick())
+  of 'r':
+    replay.looping = not replay.looping
+  of '.', '>':
+    replay.playing = false
+    replay.seekReplay(
+      sim,
+      keyframes,
+      min(replay.replayMaxTick(), sim.tickCount + ReplayFps * 5)
+    )
+  else:
+    discard
+
 var appState: WebSocketAppState
 
 proc initAppState() =
@@ -3555,6 +3973,15 @@ proc websocketHandler(
             state.pendingScorePanelClickX = scorePanelClick.x
             state.pendingScorePanelClickY = scorePanelClick.y
             appState.globalSendReady[websocket] = true
+    if message.kind == BinaryMessage:
+      {.gcsafe.}:
+        withLock appState.lock:
+          if appState.replayServerMode and
+              websocket.socketKind() == SocketGlobal and
+              websocket in appState.globalViewers:
+            appState.globalViewers[websocket].applyReplayViewerMouse(
+              message.data
+            )
     let chatText = message.playerChatFromMessage().cleanChatMessage()
     if message.kind == BinaryMessage and
         isSpritePlayerInputPacket(message.data):
@@ -3953,9 +4380,11 @@ proc runReplayServerLoop(
     replayData = ReplayData()
     replaySeed = 0x1F1B10C
     replayLoaded = false
+    keyframes: seq[ReplayKeyframe] = @[]
   if runtimeConfig.replay.len > 0:
     replayData = parseReplayBytes(runtimeConfig.replay)
     replaySeed = replayData.replayRunConfigFor().seed
+    keyframes = replayData.buildReplayKeyframes(replaySeed)
     replayLoaded = true
   appState.replayLoaded = replayLoaded
 
@@ -4004,6 +4433,7 @@ proc runReplayServerLoop(
         replaySeed = replayData.replayRunConfigFor().seed
         sim = initSimServer(replaySeed)
         replay = initReplayPlayer(replayData)
+        keyframes = replayData.buildReplayKeyframes(replaySeed)
         replayLoaded = true
         {.gcsafe.}:
           withLock appState.lock:
@@ -4011,24 +4441,105 @@ proc runReplayServerLoop(
       except CatchableError as e:
         echo "Could not load replay uri: ", e.msg
 
+    var
+      replayCommands: seq[char] = @[]
+      replaySeekTick = -1
+    let maxTick = replay.replayMaxTick()
     {.gcsafe.}:
       withLock appState.lock:
         for websocket, state in appState.globalViewers.pairs:
-          if websocket.socketKind() == SocketGlobal and
-              appState.globalSendReady.getOrDefault(websocket, true):
+          if websocket.socketKind() != SocketGlobal:
+            continue
+          if state.mousePressed:
+            state.mousePressed = false
+            if state.mouseLayer == GlobalReplayControlsLayerId:
+              let command = replayControlCommandAt(
+                state.mouseX,
+                state.mouseY
+              )
+              if command != '\0':
+                replayCommands.add(command)
+              let scrubTick = replayScrubTickAt(
+                state.mouseX,
+                state.mouseY,
+                maxTick
+              )
+              if scrubTick >= 0:
+                state.scrubbingReplay = true
+                replaySeekTick = scrubTick
+          if state.scrubbingReplay and state.mouseDown and
+              state.mouseLayer == GlobalReplayControlsLayerId:
+            let scrubTick = replayScrubTickAt(
+              state.mouseX,
+              state.mouseY,
+              maxTick,
+              requireInside = false
+            )
+            if scrubTick >= 0:
+              replaySeekTick = scrubTick
+          if state.mouseReleased:
+            state.mouseReleased = false
+            state.scrubbingReplay = false
+          if appState.globalSendReady.getOrDefault(websocket, true):
             globalViewers.add(websocket)
             globalStates.add(state)
 
-    if replayLoaded and replay.playing:
-      replay.stepReplay(sim)
-      if not replay.playing and replay.looping and
-          replay.replayMaxTick() > 0:
-        sim = initSimServer(replaySeed)
-        replay.resetReplay()
-        replay.playing = true
+    if replayLoaded:
+      if replaySeekTick >= 0:
+        if replaySeekTick != sim.tickCount:
+          echo "Replay seek to tick ", replaySeekTick
+          replay.applyReplaySeek(sim, keyframes, replaySeekTick)
+        else:
+          replay.playing = false
+      for command in replayCommands:
+        echo "Replay command: ", command.repr
+        replay.applyReplayCommand(sim, keyframes, command)
+      if replay.playing:
+        for _ in 0 ..< replay.replaySpeed():
+          if replay.playing:
+            replay.stepReplay(sim)
+        if replay.looping and not replay.playing and maxTick > 0:
+          replay.seekReplay(sim, keyframes, 0)
+          replay.playing = true
 
-    if frameCount mod GlobalSendInterval == 0:
-      sim.sendGlobalMapPackets(globalViewers, globalStates)
+    if frameCount mod GlobalSendInterval == 0 and globalViewers.len > 0:
+      let
+        barKey = replayBarKey(
+          sim.tickCount,
+          maxTick,
+          replay.playing,
+          replay.looping,
+          replay.speedIndex
+        )
+        bar = sim.buildReplayControlsSprite(
+          sim.tickCount,
+          maxTick,
+          replay.playing,
+          replay.looping,
+          replay.speedIndex
+        )
+      for i in 0 ..< globalViewers.len:
+        var nextState: GlobalViewerState
+        var packet = buildGlobalViewerPacket(
+          sim,
+          globalStates[i],
+          nextState
+        )
+        packet.addReplayControls(nextState, bar, barKey)
+        let packetBlob = blobFromBytes(packet)
+        try:
+          globalViewers[i].send(packetBlob, BinaryMessage)
+          globalViewers[i].send(SendPingPayload, Ping)
+          {.gcsafe.}:
+            withLock appState.lock:
+              if globalViewers[i].socketKind() == SocketGlobal and
+                  globalViewers[i] in appState.globalViewers:
+                appState.globalViewers[globalViewers[i]] = nextState
+                appState.globalSendReady[globalViewers[i]] = false
+        except CatchableError:
+          {.gcsafe.}:
+            withLock appState.lock:
+              sim.removeSocket(globalViewers[i])
     inc frameCount
 
     runFrameLimiter(lastTick)
