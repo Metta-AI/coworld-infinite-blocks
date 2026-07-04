@@ -1,4 +1,5 @@
 .DS_Store
+nim.cfg
 nimcache/
 out/
 /infinite_blocks

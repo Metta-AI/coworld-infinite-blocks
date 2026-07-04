@@ -16,8 +16,8 @@
         "tokens": {
           "description": "One connection token per player slot, indexed by slot.",
           "type": "array",
-          "minItems": 0,
-          "maxItems": 16,
+          "minItems": 2,
+          "maxItems": 2,
           "items": {
             "type": "string",
             "minLength": 0
@@ -44,6 +44,13 @@
           "type": "integer",
           "minimum": 0,
           "default": 0
+        },
+        "num_agents": {
+          "description": "Player seat count used by hosted league seating.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2,
+          "default": 2
         }
       }
     },
@@ -123,18 +130,28 @@
     },
     "runnable": {
       "type": "game",
-      "image": "public.ecr.aws/s3j4p9s7/treeform/games/infinite-blocks:latest",
+      "image": "{{GAME_IMAGE}}",
       "run": ["/bin/infinite_blocks"]
     }
   },
   "player": [
     {
       "id": "stacker",
-      "name": "stacker",
+      "name": "Stacker",
       "type": "player",
-      "description": "Coworld player for infinite_blocks.",
-      "image": "public.ecr.aws/s3j4p9s7/treeform/players/stacker:latest",
+      "description": "Sprite-protocol Infinite Blocks bot that searches for low, flat landing spots and scores by causing line clears.",
+      "image": "{{STACKER_IMAGE}}",
       "run": ["/bin/stacker"]
+    }
+  ],
+  "commissioner": [
+    {
+      "id": "default-commissioner",
+      "name": "Default Commissioner",
+      "type": "commissioner",
+      "description": "Game-agnostic round-robin commissioner with mean-score rankings.",
+      "source_url": "https://github.com/Metta-AI/commissioners/tree/fa8ac7cb2bc6fd54c5675c7993919afabebcf4ba/commissioners/ruleset_strategy_commissioner",
+      "image": "{{COMMISSIONER_IMAGE}}"
     }
   ],
   "reporter": [
@@ -143,7 +160,7 @@
       "name": "Default Reporter",
       "type": "reporter",
       "description": "Default Coworld reporter for generic episode artifacts.",
-      "image": "public.ecr.aws/q5f4m8t9/cogames@sha256:396e56a9ba1576aecc5b9868a85fa309ea98fdbbf8d656c94ec021906197ea52"
+      "image": "{{REPORTER_IMAGE}}"
     }
   ],
   "grader": [
@@ -158,12 +175,33 @@
   ],
   "variants": [
     {
+      "id": "league",
+      "name": "League",
+      "game_config": {
+        "seed": 32619276,
+        "maxTicks": 9000,
+        "maxGames": 1,
+        "num_agents": 2
+      },
+      "description": "One bounded five-minute Infinite Blocks game used for hosted league rounds."
+    },
+    {
+      "id": "freeplay",
+      "name": "Freeplay",
+      "game_config": {
+        "seed": 32619276,
+        "maxTicks": 0,
+        "maxGames": 0
+      },
+      "description": "Open-ended Infinite Blocks configuration for local player testing."
+    },
+    {
       "id": "smoke",
       "name": "Smoke",
       "game_config": {
         "seed": 32619276,
         "maxTicks": 300,
-        "maxGames": 0
+        "maxGames": 1
       },
       "description": "Short deterministic infinite_blocks configuration used for manifest checks."
     }
@@ -172,7 +210,7 @@
     "game_config": {
       "seed": 32619276,
       "maxTicks": 300,
-      "maxGames": 0
+      "maxGames": 1
     },
     "players": [
       {
