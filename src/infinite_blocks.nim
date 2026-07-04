@@ -3020,8 +3020,9 @@ proc buildRewardPacket(sim: SimServer): string =
     result.add($player.score)
     result.add("\n")
 
-proc playerResultsJson(sim: SimServer): string =
-  ## Builds the current per-player result JSON.
+proc playerResultsJson(sim: SimServer, slotCount: int): string =
+  ## Builds the current per-player result JSON, padded so every
+  ## declared player slot has a row even when a player never joined.
   var
     names = newJArray()
     scores = newJArray()
@@ -3030,6 +3031,10 @@ proc playerResultsJson(sim: SimServer): string =
     names.add(%player.name)
     scores.add(%player.score)
     alive.add(%true)
+  for _ in sim.players.len ..< slotCount:
+    names.add(%"")
+    scores.add(%0)
+    alive.add(%false)
   let results = %*{
     "names": names,
     "scores": scores,
@@ -3040,12 +3045,13 @@ proc playerResultsJson(sim: SimServer): string =
 proc writeScoresIfChanged(
   sim: SimServer,
   lastScores: var string,
-  runtimeConfig: RuntimeConfig
+  runtimeConfig: RuntimeConfig,
+  slotCount: int
 ) =
   ## Writes scores when the serialized result changed.
   if runtimeConfig.resultsUri.len == 0:
     return
-  let scores = sim.playerResultsJson()
+  let scores = sim.playerResultsJson(slotCount)
   if scores == lastScores:
     return
   runtimeConfig.writeResults(scores & "\n")
@@ -4186,7 +4192,7 @@ proc runServerLoop(
             globalStates.add(state)
 
     if shouldReset:
-      sim.writeScoresIfChanged(lastScores, runtimeConfig)
+      sim.writeScoresIfChanged(lastScores, runtimeConfig, tokens.len)
       # Only the first game of a run is recorded and uploaded.
       replayWriter.finalizeReplayRecording(saveReplayPath, runtimeConfig)
       inc currentSeed
@@ -4280,7 +4286,7 @@ proc runServerLoop(
       echo "Infinite Blocks maxTicks reached: ticks=", runTicks,
         " gamesFinished=", gamesFinished,
         " maxGames=", maxGames.tickLimitText()
-      sim.writeScoresIfChanged(lastScores, runtimeConfig)
+      sim.writeScoresIfChanged(lastScores, runtimeConfig, tokens.len)
       # Only the first game of a run is recorded and uploaded.
       replayWriter.finalizeReplayRecording(saveReplayPath, runtimeConfig)
       if maxGames > 0 and gamesFinished >= maxGames:
