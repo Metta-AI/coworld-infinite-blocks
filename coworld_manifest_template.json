@@ -2,7 +2,6 @@
   "$schema": "https://raw.githubusercontent.com/Metta-AI/metta/main/packages/coworld/src/coworld/coworld_manifest_schema.json",
   "game": {
     "name": "infinite_blocks",
-    "version": "0.1.0",
     "description": "A multiplayer BitWorld falling-blocks game where players stack pieces, clear lines, and compete for score on one shared board.",
     "owner": "treeform@softmax.com",
     "config_schema": {
@@ -135,7 +134,8 @@
     "runnable": {
       "type": "game",
       "image": "{{GAME_IMAGE}}",
-      "run": ["/bin/infinite_blocks"]
+      "run": ["/bin/infinite_blocks"],
+      "source_url": "https://github.com/Metta-AI/coworld-infinite-blocks/tree/master"
     }
   },
   "player": [
@@ -145,7 +145,8 @@
       "type": "player",
       "description": "Sprite-protocol Infinite Blocks bot that searches for low, flat landing spots and scores by causing line clears.",
       "image": "{{STACKER_IMAGE}}",
-      "run": ["/bin/stacker"]
+      "run": ["/bin/stacker"],
+      "source_url": "https://github.com/Metta-AI/coworld-infinite-blocks/tree/master/players/stacker"
     }
   ],
   "commissioner": [
@@ -158,15 +159,7 @@
       "image": "{{COMMISSIONER_IMAGE}}"
     }
   ],
-  "reporter": [
-    {
-      "id": "default-reporter",
-      "name": "Default Reporter",
-      "type": "reporter",
-      "description": "Default Coworld reporter for generic episode artifacts.",
-      "image": "{{REPORTER_IMAGE}}"
-    }
-  ],
+  "reporter": [],
   "grader": [
     {
       "id": "bitworld-score-grader",
@@ -174,7 +167,7 @@
       "type": "grader",
       "description": "Generic BitWorld grader that scores episode interest from score spread and game-specific activity signals.",
       "source_url": "https://github.com/Metta-AI/coworld-infinite-blocks/tree/master/grader/graders/bitworld_score/bitworld_score_grader",
-      "image": "ghcr.io/metta-ai/coworld-infinite-blocks-grader:latest"
+      "image": "{{GRADER_IMAGE}}"
     }
   ],
   "variants": [

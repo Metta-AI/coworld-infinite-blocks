@@ -48,6 +48,5 @@ RUN apt-get update && \
 WORKDIR /workspace/coworld-infinite-blocks
 COPY --from=build /bin/infinite_blocks /bin/infinite_blocks
 COPY data ./data
-COPY coworld_manifest.json .
 
 CMD ["/bin/infinite_blocks"]

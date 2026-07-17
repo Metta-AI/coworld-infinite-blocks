@@ -1,0 +1,27 @@
+services:
+  game:
+    image: coworld-infinite-blocks-game:latest
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile
+      network: host
+  stacker:
+    image: coworld-infinite-blocks-stacker:latest
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: players/stacker/Dockerfile
+      network: host
+  commissioner:
+    image: coworld-infinite-blocks-commissioner:latest
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: commissioner/Dockerfile
+  grader:
+    image: coworld-infinite-blocks-grader:latest
+    platform: linux/amd64
+    build:
+      context: grader
+      dockerfile: graders/bitworld_score/bitworld_score_grader/Dockerfile
