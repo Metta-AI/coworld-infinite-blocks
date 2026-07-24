@@ -1,0 +1,8 @@
+{
+  "author": "softmax@softmax.com",
+  "name": "polite",
+  "image_uri": "",
+  "binary": "/bin/polite",
+  "description": "Courteous Infinite Blocks bot: packs pieces snugly against existing blocks, spreads low across the ground instead of stacking, never leaves trapped gaps, and journeys across the shared board to fill the best notch.",
+  "games": ["infinite_blocks"]
+}

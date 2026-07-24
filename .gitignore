@@ -5,3 +5,11 @@ out/
 dist/
 /infinite_blocks
 /players/stacker/stacker
+
+# Local build artifacts (run_local.sh rebuilds these)
+/ib_server
+/stacker_bin
+/polite_bin
+
+# Vendored bitworld at the nimby.lock commit (run_local.sh clones it)
+/vendor/
