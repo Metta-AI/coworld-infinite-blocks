@@ -177,9 +177,15 @@ type
     message: string
     messageTicks: int
 
+  DepartedPlayerResult = object
+    slot: int
+    name: string
+    score: int
+
   SimServer* = object
     tickCount*: int
     players: seq[Player]
+    departedPlayerResults: seq[DepartedPlayerResult]
     settledColors: seq[uint8]
     settledOwners: seq[int]
     settledConnections: seq[uint8]
@@ -3028,27 +3034,46 @@ proc playerResultsJson*(sim: SimServer, slotCount: int): string =
   ## results follow authenticated slot order rather than websocket arrival
   ## order; players without a declared slot retain arrival-order fallback.
   var
-    resultCount = max(slotCount, sim.players.len)
+    resultCount =
+      if slotCount > 0:
+        slotCount
+      else:
+        sim.departedPlayerResults.len + sim.players.len
     resultNames = newSeq[string](resultCount)
     resultScores = newSeq[int](resultCount)
     resultAlive = newSeq[bool](resultCount)
-    overflowPlayers: seq[int]
-  for playerIndex, player in sim.players:
-    if player.slot >= 0 and player.slot < resultCount and
-        not resultAlive[player.slot]:
+    resultAssigned = newSeq[bool](resultCount)
+    overflowResults: seq[DepartedPlayerResult]
+  for player in sim.departedPlayerResults:
+    if player.slot >= 0 and player.slot < resultCount:
+      resultNames[player.slot] = player.name
+      resultScores[player.slot] = player.score
+      resultAlive[player.slot] = false
+      resultAssigned[player.slot] = true
+    else:
+      overflowResults.add(player)
+  for player in sim.players:
+    let playerResult = DepartedPlayerResult(
+      slot: player.slot,
+      name: player.name,
+      score: player.score
+    )
+    if player.slot >= 0 and player.slot < resultCount:
       resultNames[player.slot] = player.name
       resultScores[player.slot] = player.score
       resultAlive[player.slot] = true
+      resultAssigned[player.slot] = true
     else:
-      overflowPlayers.add(playerIndex)
+      overflowResults.add(playerResult)
   var overflowIndex = 0
   for resultIndex in 0 ..< resultCount:
-    if resultAlive[resultIndex] or overflowIndex >= overflowPlayers.len:
+    if resultAssigned[resultIndex] or overflowIndex >= overflowResults.len:
       continue
-    let player = sim.players[overflowPlayers[overflowIndex]]
+    let player = overflowResults[overflowIndex]
     resultNames[resultIndex] = player.name
     resultScores[resultIndex] = player.score
-    resultAlive[resultIndex] = true
+    resultAlive[resultIndex] = false
+    resultAssigned[resultIndex] = true
     inc overflowIndex
   let results = %*{
     "names": resultNames,
@@ -3174,6 +3199,12 @@ proc removePlayerAt*(sim: var SimServer, playerIndex: int) =
   ## Removes one player from the simulation, compacting indices.
   if playerIndex < 0 or playerIndex >= sim.players.len:
     return
+  let player = sim.players[playerIndex]
+  sim.departedPlayerResults.add DepartedPlayerResult(
+    slot: player.slot,
+    name: player.name,
+    score: player.score
+  )
   sim.players.delete(playerIndex)
 
 proc applyReplayEvents(replay: var ReplayPlayer, sim: var SimServer) =
@@ -3547,7 +3578,7 @@ proc removePlayerSocket(sim: var SimServer, websocket: WebSocket) =
     appState.socketKinds.del(websocket)
 
   if removedIndex >= 0 and removedIndex < sim.players.len:
-    sim.players.delete(removedIndex)
+    sim.removePlayerAt(removedIndex)
     for ws, value in appState.playerIndices.mpairs:
       if value > removedIndex:
         dec value

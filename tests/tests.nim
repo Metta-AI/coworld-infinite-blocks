@@ -23,6 +23,14 @@ block:
   doAssert results["alive"].getElems().mapIt(it.getBool()) ==
     @[true, false, true],
     "unjoined slots should remain explicit and inactive"
+  sim.removePlayerAt(0)
+  let afterDisconnect = parseJson(sim.playerResultsJson(3))
+  doAssert afterDisconnect["names"].getElems().mapIt(it.getStr()) ==
+    @["slot-zero", "", "slot-two"],
+    "a disconnected player's final result should remain in its slot"
+  doAssert afterDisconnect["alive"].getElems().mapIt(it.getBool()) ==
+    @[true, false, false],
+    "a disconnected player's retained result should be marked inactive"
 
 echo "Testing replay round trip"
 block:
