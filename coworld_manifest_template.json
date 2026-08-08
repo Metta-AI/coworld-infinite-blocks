@@ -1,5 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/Metta-AI/metta/main/packages/coworld/src/coworld/coworld_manifest_schema.json",
+  "tags": ["falling-blocks", "real-time", "multiplayer"],
   "game": {
     "name": "infinite_blocks",
     "description": "A multiplayer BitWorld falling-blocks game where players stack pieces, clear lines, and compete for score on one shared board.",

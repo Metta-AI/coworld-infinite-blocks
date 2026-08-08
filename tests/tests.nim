@@ -8,6 +8,9 @@ echo "Testing Infinite Blocks"
 doAssert fileExists("coworld_manifest_template.json"), "manifest template should exist"
 doAssert fileExists("data/sprites.aseprite"), "sprites should exist"
 doAssert fileExists("src/infinite_blocks.nim"), "game source should exist"
+let manifest = parseFile("coworld_manifest_template.json")
+doAssert manifest["tags"].len >= 3,
+  "Coworld certification requires at least three manifest tags"
 
 echo "Testing result attribution follows authenticated slots"
 block:
