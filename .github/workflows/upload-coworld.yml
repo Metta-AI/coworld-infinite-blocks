@@ -79,6 +79,12 @@ jobs:
             --version "${{ steps.version.outputs.version }}" \
             --output tmp/coworld_manifest.json
 
+      - name: Certify coworld manifest
+        run: |
+          uvx --from "$COWORLD_CLI" coworld certify tmp/coworld_manifest.json \
+            --timeout-seconds 600 \
+            --no-open-report
+
       - name: Upload coworld
         if: ${{ github.event.inputs.confirm_upload == 'upload' }}
         run: |
