@@ -178,9 +178,11 @@ type
     messageTicks: int
 
   DepartedPlayerResult = object
+    id: int
     slot: int
     name: string
     score: int
+    alive: bool
 
   SimServer* = object
     tickCount*: int
@@ -3048,23 +3050,26 @@ proc playerResultsJson*(sim: SimServer, slotCount: int): string =
     if player.slot >= 0 and player.slot < resultCount:
       resultNames[player.slot] = player.name
       resultScores[player.slot] = player.score
-      resultAlive[player.slot] = false
+      resultAlive[player.slot] = player.alive
       resultAssigned[player.slot] = true
     else:
       overflowResults.add(player)
   for player in sim.players:
     let playerResult = DepartedPlayerResult(
+      id: player.id,
       slot: player.slot,
       name: player.name,
-      score: player.score
+      score: player.score,
+      alive: true
     )
     if player.slot >= 0 and player.slot < resultCount:
       resultNames[player.slot] = player.name
       resultScores[player.slot] = player.score
-      resultAlive[player.slot] = true
+      resultAlive[player.slot] = playerResult.alive
       resultAssigned[player.slot] = true
     else:
       overflowResults.add(playerResult)
+  overflowResults.sort(proc(a, b: DepartedPlayerResult): int = cmp(a.id, b.id))
   var overflowIndex = 0
   for resultIndex in 0 ..< resultCount:
     if resultAssigned[resultIndex] or overflowIndex >= overflowResults.len:
@@ -3072,7 +3077,7 @@ proc playerResultsJson*(sim: SimServer, slotCount: int): string =
     let player = overflowResults[overflowIndex]
     resultNames[resultIndex] = player.name
     resultScores[resultIndex] = player.score
-    resultAlive[resultIndex] = false
+    resultAlive[resultIndex] = player.alive
     resultAssigned[resultIndex] = true
     inc overflowIndex
   let results = %*{
@@ -3201,9 +3206,11 @@ proc removePlayerAt*(sim: var SimServer, playerIndex: int) =
     return
   let player = sim.players[playerIndex]
   sim.departedPlayerResults.add DepartedPlayerResult(
+    id: player.id,
     slot: player.slot,
     name: player.name,
-    score: player.score
+    score: player.score,
+    alive: false
   )
   sim.players.delete(playerIndex)
 

@@ -32,6 +32,20 @@ block:
     @[true, false, false],
     "a disconnected player's retained result should be marked inactive"
 
+echo "Testing uncredentialed result fallback preserves arrival order and liveness"
+block:
+  var sim = initSimServer(23)
+  doAssert sim.addPlayer("first") == 0
+  doAssert sim.addPlayer("second") == 1
+  sim.removePlayerAt(1)
+  let results = parseJson(sim.playerResultsJson(0))
+  doAssert results["names"].getElems().mapIt(it.getStr()) ==
+    @["first", "second"],
+    "fallback results should retain original websocket arrival order"
+  doAssert results["alive"].getElems().mapIt(it.getBool()) ==
+    @[true, false],
+    "fallback results should distinguish connected and departed players"
+
 echo "Testing replay round trip"
 block:
   const
