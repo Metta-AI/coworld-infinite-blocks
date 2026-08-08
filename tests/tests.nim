@@ -1,4 +1,4 @@
-import std/[json, os]
+import std/[json, os, sequtils]
 
 {.warning[UnusedImport]: off.}
 import infinite_blocks, replays, bitworld/spriteprotocol
@@ -8,6 +8,43 @@ echo "Testing Infinite Blocks"
 doAssert fileExists("coworld_manifest_template.json"), "manifest template should exist"
 doAssert fileExists("data/sprites.aseprite"), "sprites should exist"
 doAssert fileExists("src/infinite_blocks.nim"), "game source should exist"
+
+echo "Testing result attribution follows authenticated slots"
+block:
+  var sim = initSimServer(17)
+  doAssert sim.addPlayer("slot-two", 2) == 0,
+    "the first connection should retain internal player index zero"
+  doAssert sim.addPlayer("slot-zero", 0) == 1,
+    "the second connection should retain internal player index one"
+  let results = parseJson(sim.playerResultsJson(3))
+  doAssert results["names"].getElems().mapIt(it.getStr()) ==
+    @["slot-zero", "", "slot-two"],
+    "result names should use authenticated slot order"
+  doAssert results["alive"].getElems().mapIt(it.getBool()) ==
+    @[true, false, true],
+    "unjoined slots should remain explicit and inactive"
+  sim.removePlayerAt(0)
+  let afterDisconnect = parseJson(sim.playerResultsJson(3))
+  doAssert afterDisconnect["names"].getElems().mapIt(it.getStr()) ==
+    @["slot-zero", "", "slot-two"],
+    "a disconnected player's final result should remain in its slot"
+  doAssert afterDisconnect["alive"].getElems().mapIt(it.getBool()) ==
+    @[true, false, false],
+    "a disconnected player's retained result should be marked inactive"
+
+echo "Testing uncredentialed result fallback preserves arrival order and liveness"
+block:
+  var sim = initSimServer(23)
+  doAssert sim.addPlayer("first") == 0
+  doAssert sim.addPlayer("second") == 1
+  sim.removePlayerAt(1)
+  let results = parseJson(sim.playerResultsJson(0))
+  doAssert results["names"].getElems().mapIt(it.getStr()) ==
+    @["first", "second"],
+    "fallback results should retain original websocket arrival order"
+  doAssert results["alive"].getElems().mapIt(it.getBool()) ==
+    @[true, false],
+    "fallback results should distinguish connected and departed players"
 
 echo "Testing replay round trip"
 block:
