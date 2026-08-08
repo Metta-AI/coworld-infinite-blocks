@@ -152,6 +152,7 @@ type
 
   Player = object
     id: int
+    slot: int
     name: string
     color: uint8
     rgbaColor: RgbaColor
@@ -1330,11 +1331,12 @@ proc respawnPlayer(sim: var SimServer, playerIndex, centerX, topY: int, recenter
   sim.players[playerIndex].pendingSpawn = false
   sim.players[playerIndex].pendingSpawnWaitClear = false
 
-proc addPlayer*(sim: var SimServer, name: string): int =
+proc addPlayer*(sim: var SimServer, name: string, slot = -1): int =
   inc sim.nextPlayerId
   let playerId = sim.nextPlayerId
   sim.players.add Player(
     id: playerId,
+    slot: slot,
     name: name,
     color: colorForPlayer(playerId),
     rgbaColor: rgbaColorForPlayer(playerId),
@@ -3020,25 +3022,38 @@ proc buildRewardPacket(sim: SimServer): string =
     result.add($player.score)
     result.add("\n")
 
-proc playerResultsJson(sim: SimServer, slotCount: int): string =
+proc playerResultsJson*(sim: SimServer, slotCount: int): string =
   ## Builds the current per-player result JSON, padded so every
-  ## declared player slot has a row even when a player never joined.
+  ## declared player slot has a row even when a player never joined. Player
+  ## results follow authenticated slot order rather than websocket arrival
+  ## order; players without a declared slot retain arrival-order fallback.
   var
-    names = newJArray()
-    scores = newJArray()
-    alive = newJArray()
-  for player in sim.players:
-    names.add(%player.name)
-    scores.add(%player.score)
-    alive.add(%true)
-  for _ in sim.players.len ..< slotCount:
-    names.add(%"")
-    scores.add(%0)
-    alive.add(%false)
+    resultCount = max(slotCount, sim.players.len)
+    resultNames = newSeq[string](resultCount)
+    resultScores = newSeq[int](resultCount)
+    resultAlive = newSeq[bool](resultCount)
+    overflowPlayers: seq[int]
+  for playerIndex, player in sim.players:
+    if player.slot >= 0 and player.slot < resultCount and
+        not resultAlive[player.slot]:
+      resultNames[player.slot] = player.name
+      resultScores[player.slot] = player.score
+      resultAlive[player.slot] = true
+    else:
+      overflowPlayers.add(playerIndex)
+  var overflowIndex = 0
+  for resultIndex in 0 ..< resultCount:
+    if resultAlive[resultIndex] or overflowIndex >= overflowPlayers.len:
+      continue
+    let player = sim.players[overflowPlayers[overflowIndex]]
+    resultNames[resultIndex] = player.name
+    resultScores[resultIndex] = player.score
+    resultAlive[resultIndex] = true
+    inc overflowIndex
   let results = %*{
-    "names": names,
-    "scores": scores,
-    "alive": alive
+    "names": resultNames,
+    "scores": resultScores,
+    "alive": resultAlive
   }
   $results
 
@@ -4135,7 +4150,10 @@ proc runServerLoop(
             if appState.playerIndices[websocket] == 0x7fffffff:
               let
                 name = appState.playerNames.getOrDefault(websocket, "unknown")
-                playerIndex = sim.addPlayer(name)
+                playerIndex = sim.addPlayer(
+                  name,
+                  appState.playerSlots.getOrDefault(websocket, -1)
+                )
               appState.playerIndices[websocket] = playerIndex
               if replayWriter.enabled:
                 replayWriter.writeJoin(
@@ -4208,7 +4226,10 @@ proc runServerLoop(
               continue
             if appState.playerIndices[websocket] == 0x7fffffff:
               let name = appState.playerNames.getOrDefault(websocket, "unknown")
-              appState.playerIndices[websocket] = sim.addPlayer(name)
+              appState.playerIndices[websocket] = sim.addPlayer(
+                name,
+                appState.playerSlots.getOrDefault(websocket, -1)
+              )
             if appState.playerSendReady.getOrDefault(websocket, true):
               sockets.add(websocket)
               playerIndices.add(appState.playerIndices[websocket])
