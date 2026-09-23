@@ -22,8 +22,6 @@ jobs:
         run: |
           cd ..
           nimby create
-          ln -s "$GITHUB_WORKSPACE" infinite_blocks
-          nimby install "infinite_blocks/infinite_blocks.nimble"
           nimby sync "$GITHUB_WORKSPACE/nimby.lock"
       - run: nim check src/infinite_blocks.nim
       - run: nim r tests/tests.nim
