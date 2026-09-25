@@ -36,7 +36,13 @@ RUN nim c \
   --path:src \
   --nimcache:/tmp/coworld-nimcache \
   --out:/bin/infinite_blocks \
-  src/infinite_blocks.nim
+  src/infinite_blocks.nim && \
+  nim c \
+  -d:release \
+  --path:src \
+  --nimcache:/tmp/training-nimcache \
+  --out:/bin/infinite-blocks-bridge \
+  src/training_bridge.nim
 
 # Run Docker.
 FROM debian:bookworm-slim
@@ -47,6 +53,7 @@ RUN apt-get update && \
 
 WORKDIR /workspace/coworld-infinite-blocks
 COPY --from=build /bin/infinite_blocks /bin/infinite_blocks
+COPY --from=build /bin/infinite-blocks-bridge /bin/infinite-blocks-bridge
 COPY data ./data
 
 CMD ["/bin/infinite_blocks"]

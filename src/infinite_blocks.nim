@@ -253,6 +253,8 @@ type
     globalViewers: Table[WebSocket, GlobalViewerState]
     rewardViewers: Table[WebSocket, bool]
     playerSendReady: Table[WebSocket, bool]
+    policyViewers: Table[WebSocket, bool]
+    policyLastTick: Table[WebSocket, int]
     globalSendReady: Table[WebSocket, bool]
     rewardSendReady: Table[WebSocket, bool]
     socketKinds: Table[WebSocket, SocketKind]
@@ -3087,6 +3089,70 @@ proc playerResultsJson*(sim: SimServer, slotCount: int): string =
   }
   $results
 
+proc policyObservation*(sim: SimServer, playerIndex, horizon: int): JsonNode =
+  ## Public board facts and the acting seat's visible piece, shared by hosted
+  ## player policies and the local training bridge.
+  let player = sim.players[playerIndex]
+  var
+    values = newJArray()
+    columns = newJArray()
+    local = newJArray()
+    players = newJArray()
+  for value in [sim.tickCount, max(0, horizon - sim.tickCount), player.slot,
+                int(player.alive), int(player.hasPiece), player.cellX,
+                player.cellY, player.rotation, player.score]:
+    values.add(%value)
+  for kind in PieceKind:
+    values.add(%int(player.pieceKind == kind))
+  for kind in PieceKind:
+    values.add(%int(player.nextKind == kind))
+  for x in 0 ..< BoardWidthCells:
+    var top = BaseTerrainY
+    for y in 0 ..< BaseTerrainY:
+      if sim.settledColors[boardIndex(x, y)] != 0:
+        top = y
+        break
+    columns.add(%(BaseTerrainY - top))
+    values.add(%(BaseTerrainY - top))
+  for dy in -10 .. 10:
+    var row = newJArray()
+    for dx in -10 .. 10:
+      let x = player.cellX + dx
+      let y = player.cellY + dy
+      let cell = if x < 0 or x >= BoardWidthCells or
+          y < 0 or y >= BoardHeightCells: -1
+        elif sim.terrain[boardIndex(x, y)]: 2
+        elif sim.settledColors[boardIndex(x, y)] != 0: 1
+        else: 0
+      row.add(%cell)
+      values.add(%cell)
+    local.add(row)
+  for slot in 0 ..< 6:
+    var position = -1
+    for index, other in sim.players:
+      if other.slot == slot: position = index
+    if position >= 0:
+      let other = sim.players[position]
+      players.add(%*{"slot": slot, "x": other.cellX, "y": other.cellY,
+        "score": other.score, "active": other.alive and other.hasPiece})
+      for value in [other.cellX, other.cellY, other.score,
+                    int(other.alive and other.hasPiece)]: values.add(%value)
+    else:
+      players.add(%*{"slot": slot, "x": -1, "y": -1,
+        "score": 0, "active": false})
+      for value in [-1, -1, 0, 0]: values.add(%value)
+  result = %*{"type": "decision", "tick": sim.tickCount,
+    "horizon": horizon, "seat": player.slot,
+    "piece": {"kind": $player.pieceKind,
+      "next": $player.nextKind, "rotation": player.rotation,
+      "x": player.cellX, "y": player.cellY,
+      "active": player.alive and player.hasPiece},
+    "columns": columns, "local": local, "players": players,
+    "values": values,
+    "actions": [{"action": "watch"}, {"action": "left"},
+      {"action": "right"}, {"action": "down"},
+      {"action": "rotate"}]}
+
 proc writeScoresIfChanged(
   sim: SimServer,
   lastScores: var string,
@@ -3528,6 +3594,8 @@ proc initAppState() =
   appState.globalViewers = initTable[WebSocket, GlobalViewerState]()
   appState.rewardViewers = initTable[WebSocket, bool]()
   appState.playerSendReady = initTable[WebSocket, bool]()
+  appState.policyViewers = initTable[WebSocket, bool]()
+  appState.policyLastTick = initTable[WebSocket, int]()
   appState.globalSendReady = initTable[WebSocket, bool]()
   appState.rewardSendReady = initTable[WebSocket, bool]()
   appState.socketKinds = initTable[WebSocket, SocketKind]()
@@ -3564,6 +3632,10 @@ proc removeRewardSocket(websocket: WebSocket) =
 
 proc removePlayerSocket(sim: var SimServer, websocket: WebSocket) =
   ## Removes a player websocket and its player slot.
+  if websocket in appState.policyViewers:
+    appState.policyViewers.del(websocket)
+  if websocket in appState.policyLastTick:
+    appState.policyLastTick.del(websocket)
   if websocket in appState.spritePlayerViewers:
     appState.spritePlayerViewers.del(websocket)
   if websocket in appState.playerSendReady:
@@ -3895,6 +3967,8 @@ proc httpHandler(request: Request) =
     let
       slot = request.playerSlot()
       token = request.playerToken()
+      wantsPolicyView =
+        request.queryParams.getOrDefault("policy_observations", "") == "1"
     var allowed = false
     {.gcsafe.}:
       withLock appState.lock:
@@ -3920,6 +3994,9 @@ proc httpHandler(request: Request) =
         appState.playerSlots[websocket] = slot
         appState.spritePlayerViewers[websocket] = newGlobalViewerState()
         appState.playerSendReady[websocket] = true
+        if wantsPolicyView:
+          appState.policyViewers[websocket] = true
+          appState.policyLastTick[websocket] = -4
         appState.playerIndices[websocket] = 0x7fffffff
         appState.inputMasks[websocket] = 0
         appState.lastAppliedMasks[websocket] = 0
@@ -4181,6 +4258,7 @@ proc runServerLoop(
           for _, value in appState.lastAppliedMasks.mpairs:
             value = 0
           appState.chatMessages.clear()
+          appState.policyLastTick.clear()
         else:
           for websocket in appState.playerIndices.keys:
             if websocket.socketKind() != SocketPlayer:
@@ -4308,6 +4386,7 @@ proc runServerLoop(
 
     for i in 0 ..< sockets.len:
       var nextState: GlobalViewerState
+      var sendPolicy = false
       let frameBlob = blobFromBytes(
         buildPlayerViewerPacket(
           sim,
@@ -4321,8 +4400,16 @@ proc runServerLoop(
           if sockets[i].socketKind() == SocketPlayer and
               sockets[i] in appState.spritePlayerViewers:
             appState.spritePlayerViewers[sockets[i]] = nextState
+          if sockets[i] in appState.policyViewers and
+              sim.tickCount - appState.policyLastTick.getOrDefault(
+                sockets[i], -4) >= 5:
+            appState.policyLastTick[sockets[i]] = sim.tickCount
+            sendPolicy = true
       try:
         sockets[i].send(frameBlob, BinaryMessage)
+        if sendPolicy:
+          sockets[i].send($sim.policyObservation(playerIndices[i], maxTicks),
+            TextMessage)
         sockets[i].send(SendPingPayload, Ping)
         {.gcsafe.}:
           withLock appState.lock:
@@ -4350,6 +4437,24 @@ proc runServerLoop(
       replayWriter.finalizeReplayRecording(saveReplayPath, runtimeConfig)
       if maxGames > 0 and gamesFinished >= maxGames:
         echo "Infinite Blocks maxGames reached, shutting down."
+        var connections: seq[tuple[websocket: WebSocket, policy: bool]]
+        {.gcsafe.}:
+          withLock appState.lock:
+            for websocket in appState.socketKinds.keys:
+              connections.add((websocket: websocket,
+                policy: websocket in appState.policyViewers))
+        for connection in connections:
+          if connection.policy:
+            connection.websocket.send("{\"type\":\"final\"}", TextMessage)
+          connection.websocket.close()
+        let closeDeadline = getMonoTime() + initDuration(seconds = 5)
+        while getMonoTime() < closeDeadline:
+          var openConnections: int
+          {.gcsafe.}:
+            withLock appState.lock:
+              openConnections = appState.socketKinds.len
+          if openConnections == 0: break
+          sleep(10)
         httpServer.close()
         joinThread(serverThread)
         break
