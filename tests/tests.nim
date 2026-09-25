@@ -35,6 +35,23 @@ block:
     @[true, false, false],
     "a disconnected player's retained result should be marked inactive"
 
+echo "Testing the normal player policy observation"
+block:
+  var sim = initSimServer(31)
+  doAssert sim.addPlayer("first", 0) == 0
+  doAssert sim.addPlayer("second", 1) == 1
+  let view = sim.policyObservation(0, 300)
+  doAssert view["type"].getStr() == "decision"
+  doAssert view["seat"].getInt() == 0
+  doAssert view["values"].len == 615
+  doAssert view["actions"].len == 5
+  doAssert view["actions"][4]["action"].getStr() == "rotate"
+  doAssert view["columns"].len == 125
+  doAssert view["local"].len == 21
+  doAssert view["players"].len == 6
+  doAssert view{"rng"}.isNil and view{"next_kind_of_other"}.isNil,
+    "policy view includes hidden game state"
+
 echo "Testing uncredentialed result fallback preserves arrival order and liveness"
 block:
   var sim = initSimServer(23)
