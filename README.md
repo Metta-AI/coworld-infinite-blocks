@@ -43,8 +43,7 @@ heights, a 21×21 local board, other players' public positions and scores, and
 `players/policy/policy.nim` chooses one of `watch`, `left`, `right`, `down`, or
 `rotate` from that message, then sends the corresponding Sprite input mask.
 Set `PLAYER_NUMERIC_URL` to an `/actions` endpoint returning
-`{"actions":[index]}`, or set `PLAYER_JEV=1` for Jev System One. Both modes run
-in the ordinary player container. The game owns the rules, scores, and replay.
+`{"actions":[index]}`. The numeric policy runs in the ordinary player container. The game owns the rules, scores, and replay.
 The normal certification roster keeps the `stacker` baseline.
 
 `/bin/infinite-blocks-bridge` runs the seeded game simulator with the same
