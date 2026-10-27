@@ -1,4 +1,4 @@
-import std/[json, os, sequtils]
+import std/[importutils, json, os, sequtils]
 
 {.warning[UnusedImport]: off.}
 import infinite_blocks, replays, bitworld/spriteprotocol
@@ -164,3 +164,18 @@ block:
     seeker.applyReplayCommand(seekSim, keyframes, 'e')
     doAssert seekSim.tickCount == 200, "end command should seek to the end"
   removeFile(replayPath)
+
+echo "Testing crowded spawn column relocates above terrain"
+block:
+  var sim = initSimServer(17)
+  privateAccess(typeof(sim))
+  # The board has 125 columns and its terrain floor is row 77. Block the
+  # initial spawn column above that floor while leaving adjacent space free.
+  for y in 0 ..< 77:
+    for x in 58 .. 68:
+      sim.settledColors[y * 125 + x] = 1
+  doAssert sim.addPlayer("crowded-spawn", 0) == 0
+  privateAccess(typeof(sim.players[0]))
+  doAssert sim.players[0].hasPiece
+  doAssert sim.players[0].cellY < 77,
+    "blocked column must relocate instead of spawning beneath the terrain"
