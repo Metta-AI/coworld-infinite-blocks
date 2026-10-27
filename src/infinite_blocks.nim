@@ -1200,10 +1200,12 @@ proc findSpawnInColumn(
   ## Searches one column for a nearby spawn row.
   for offset in 0 ..< 80:
     let topY = max(0, desiredTopY - offset)
-    if sim.canPlace(cellX, topY, kind, 0):
+    if topY < BaseTerrainY and sim.canPlace(cellX, topY, kind, 0):
       return (true, cellX, topY)
   for offset in 1 ..< 40:
-    let topY = min(BoardHeightCells - 4, desiredTopY + offset)
+    let topY = desiredTopY + offset
+    if topY >= BaseTerrainY:
+      break
     if sim.canPlace(cellX, topY, kind, 0):
       return (true, cellX, topY)
   for topY in 0 ..< BaseTerrainY:
